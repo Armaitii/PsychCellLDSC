@@ -1,0 +1,689 @@
+"""
+S-LDSC cell-type partitioned heritability pipeline, CATlas brain cCREs x
+multiple GWAS traits (OCD, SCZ validation, TS comparison, ...).
+
+Design: annotation/LD-score stages (liftOver -> make_annot -> l2) are
+trait-independent and computed ONCE per celltype, shared across every
+trait. Only GWAS prep/munge and the h2 regression onward are per-trait.
+
+Stages:
+  0. prep_gwas + munge_sumstats  -> gwas/{trait}/{trait}.munged.sumstats.gz
+     (format-agnostic: branches on config["traits"][trait]["format"])
+  1. liftOver cCRE beds hg38 -> hg19  (keeps chr-prefix; make_annot.py requires it)
+  2. make_annot.py -> per-chromosome binary annotation files
+  3. ldsc.py --l2 -> per-chromosome LD scores (thin-annot, HapMap3-restricted output)
+  4. ldsc.py --h2 -> partitioned heritability regression, per trait,
+     against baseline_v1.2 AND baselineLD_v2.2
+  5. Aggregate + FDR/Bonferroni correction, per trait
+
+Run e.g.:
+  snakemake -j 4 --use-conda   (adjust -j to core budget; see notes in config.yaml)
+  snakemake -n                 (dry run, sanity check DAG first)
+"""
+
+import os
+from itertools import combinations
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+configfile: "config.yaml"
+
+CELLTYPES = list(dict.fromkeys(config["celltypes"]))
+CHRS = list(range(1, 23))
+BASELINES = ["baseline_v1.2", "baselineLD_v2.2"]
+TRAITS = list(config["traits"].keys())
+
+# Traits supplied ALREADY MUNGED (format: premunged). These have no raw_file
+# and must never be routed through prep_gwas / munge_sumstats -- doing so
+# raises KeyError: 'raw_file'.
+PREMUNGED = {
+    t for t, cfg in config["traits"].items()
+    if cfg.get("format") == "premunged"
+}
+
+
+def sumstats_for(trait):
+    """Single source of truth for a trait's munged sumstats path.
+
+    premunged -> the external file, used as-is (no prep, no munge)
+    otherwise -> the file our own munge_sumstats rule produces
+    """
+    cfg = config["traits"][trait]
+    if trait in PREMUNGED:
+        if "premunged_file" not in cfg:
+            raise KeyError(
+                f"traits.{trait} has format=premunged but no 'premunged_file'"
+            )
+        return cfg["premunged_file"]
+    return f"gwas/{trait}/{trait}.munged.sumstats.gz"
+
+
+# Optional list of rsIDs to drop before --rg (see rule drop_incompatible_snps).
+EXCLUDE_SNPS = config.get("exclude_snps", "gwas/exclude_snps.txt")
+
+
+def rg_sumstats_for(trait):
+    """Sumstats used for --rg: the allele-filtered copy.
+
+    ldsc's _align_alleles crashes with
+        KeyError: Incompatible alleles in .sumstats files: TGTC
+    if ANY merged SNP has alleles that cannot be reconciled by strand flip or
+    reference swap (e.g. TS says T/G where Anorexia says T/C). _filter_alleles
+    already drops such SNPs, but a stale `alleles` Series means the alignment
+    step still sees them. Rather than patch ldsc, we remove the handful of
+    offending rsIDs up front -- for TS x Anorexia that is exactly 1 SNP out of
+    1,094,320 (~0.0001%), which is scientifically inconsequential.
+    """
+    return f"gwas/rg_filtered/{trait}.sumstats.gz"
+
+
+# Primary traits to compare pairwise with LDSC --rg.
+# Defaults to every trait already defined in the pipeline.
+# Set rg_traits in config.yaml to restrict this family.
+
+# Primary analyses
+RG_BASE_TRAIT = config["rg_base_trait"]
+RG_COMPARISON_TRAITS = config["rg_comparison_traits"]
+
+# Exploratory analyses
+RG_TRAITS = config["rg_traits"]
+RG_PAIRS = list(combinations(RG_TRAITS, 2))
+
+missing_rg_traits = sorted(set(RG_TRAITS) - set(TRAITS))
+if missing_rg_traits:
+    raise ValueError(
+        f"rg_traits contains names not present in traits: {missing_rg_traits}"
+    )
+
+# Canonical unordered pairs: e.g. OCD_vs_SCZ but never SCZ_vs_OCD.
+RG_PRIMARY = [
+    (RG_BASE_TRAIT, t)
+    for t in RG_COMPARISON_TRAITS
+    if t != RG_BASE_TRAIT
+]
+
+RG_PAIRWISE = RG_PAIRS
+RG_ALL = list(dict.fromkeys(RG_PRIMARY + RG_PAIRWISE))
+RG_LOGS = [
+    f"results/rg/{trait1}_vs_{trait2}.log"
+    for trait1, trait2 in RG_PAIRS
+]
+
+BASELINE_PREFIX = {
+    "baseline_v1.2": "baseline",
+    "baselineLD_v2.2": "baselineLD",
+}
+
+wildcard_constraints:
+    baseline = "baseline_v1\\.2|baselineLD_v2\\.2",
+    trait = "|".join(TRAITS),
+    trait1 = "|".join(TRAITS),
+    trait2 = "|".join(TRAITS)
+
+rule all:
+    input:
+        expand(
+            "results/{trait}/{celltype}_{baseline}.results",
+            trait=TRAITS, celltype=CELLTYPES, baseline=BASELINES
+        ),
+        expand("results/{trait}/summary_table.tsv", trait=TRAITS),
+        expand("results/{trait}/summary_table_corrected.tsv", trait=TRAITS),
+        RG_LOGS,
+        "results/rg/rg_summary.tsv" if RG_PAIRS else []
+
+# ---------------------------------------------------------------------------
+# 0a. Prep raw GWAS file into a uniform intermediate: guarantees a "Neff"
+#     column and passes through SNP/A1/A2/P regardless of source format,
+#     so munge_sumstats downstream is one generic rule.
+#
+#     format: "daner"  -> per-SNP Neff/MAF computed from daner's FRQ_A/
+#             FRQ_U/N-related columns (Neff = 2 * last_column, MAF =
+#             mean(FRQ_A, FRQ_U); same convention as the original OCD prep).
+#     format: "simple" -> fixed total N (no per-SNP FRQ), Neff computed
+#             once from n_cas/n_con in config.yaml (e.g. PGC-TS Yu et al.
+#             2019: SNP CHR BP A1 A2 INFO OR SE P, no per-SNP N column).
+# ---------------------------------------------------------------------------
+rule prep_gwas:
+    input:
+        lambda wc: config["traits"][wc.trait]["raw_file"]
+    output:
+        "gwas/{trait}/{trait}.prep"
+    params:
+        fmt = lambda wc: config["traits"][wc.trait]["format"],
+        n_cas = lambda wc: config["traits"][wc.trait].get("n_cas"),
+        n_con = lambda wc: config["traits"][wc.trait].get("n_con"),
+    run:
+        import re
+        import pandas as pd
+
+        df = pd.read_csv(input[0], sep=r"\s+", compression="infer")
+        cols = list(df.columns)
+
+        def find(*names):
+            """Case-insensitive exact column lookup."""
+            low = {c.lower(): c for c in cols}
+            for n in names:
+                if n.lower() in low:
+                    return low[n.lower()]
+            return None
+
+        def find_prefix(prefix):
+            """First column whose name starts with prefix (e.g. FRQ_A_35476)."""
+            for c in cols:
+                if c.upper().startswith(prefix.upper()):
+                    return c
+            return None
+
+        def header_counts():
+            """Parse n_cas/n_con out of daner FRQ_A_<ncas> / FRQ_U_<ncon> names."""
+            a, u = find_prefix("FRQ_A"), find_prefix("FRQ_U")
+            n_cas = n_con = None
+            if a and re.search(r"_(\d+)$", a):
+                n_cas = int(re.search(r"_(\d+)$", a).group(1))
+            if u and re.search(r"_(\d+)$", u):
+                n_con = int(re.search(r"_(\d+)$", u).group(1))
+            return n_cas, n_con
+
+        if params.fmt == "daner":
+            # -----------------------------------------------------------------
+            # Neff, selected BY COLUMN NAME (not by position).
+            #
+            #
+            # Preference order (first available wins):
+            #   1. Neff_half  -> Neff = 2 * Neff_half   (PGC convention, per-SNP)
+            #   2. Neff / N   -> used directly          (per-SNP)
+            #   3. Nca + Nco  -> 4/(1/Nca + 1/Nco)      (per-SNP)
+            #   4. n_cas/n_con from config.yaml         (study-level constant)
+            #   5. n_cas/n_con parsed from FRQ_A_*/FRQ_U_* header names
+            # -----------------------------------------------------------------
+            c_half = find("Neff_half", "Neffhalf")
+            c_neff = find("Neff", "N")
+            c_nca, c_nco = find("Nca", "N_cas", "Ncas"), find("Nco", "N_con", "Ncon")
+
+            if c_half is not None:
+                df["Neff"] = 2.0 * df[c_half]
+                src = f"2 * {c_half} (per-SNP)"
+            elif c_neff is not None and c_neff != "Neff_half":
+                df["Neff"] = df[c_neff].astype(float)
+                src = f"{c_neff} (per-SNP)"
+            elif c_nca is not None and c_nco is not None:
+                df["Neff"] = 4.0 / (1.0 / df[c_nca] + 1.0 / df[c_nco])
+                src = f"4/(1/{c_nca} + 1/{c_nco}) (per-SNP)"
+            else:
+                n_cas, n_con = params.n_cas, params.n_con
+                src_note = "config.yaml"
+                if n_cas is None or n_con is None:
+                    n_cas, n_con = header_counts()
+                    src_note = "FRQ_A_*/FRQ_U_* header"
+                if n_cas is None or n_con is None:
+                    raise ValueError(
+                        f"traits.{wildcards.trait}: daner file has no Neff_half/"
+                        "Neff/Nca+Nco column and n_cas/n_con could not be "
+                        "determined from config.yaml or the FRQ_* header names. "
+                        "Add n_cas/n_con to config.yaml."
+                    )
+                df["Neff"] = 4.0 / (1.0 / n_cas + 1.0 / n_con)
+                src = (f"4/(1/{n_cas} + 1/{n_con}) = {df['Neff'].iloc[0]:.1f} "
+                       f"(study-level, from {src_note})")
+
+            # MAF from the FRQ columns BY NAME, not position 5/6.
+            c_fa, c_fu = find_prefix("FRQ_A"), find_prefix("FRQ_U")
+            if c_fa is not None and c_fu is not None:
+                df["MAF"] = (df[c_fa] + df[c_fu]) / 2.0
+            else:
+                raise ValueError(
+                    f"traits.{wildcards.trait}: daner file lacks FRQ_A_*/FRQ_U_* "
+                    "columns needed for MAF."
+                )
+
+        elif params.fmt == "simple":
+            n_cas, n_con = params.n_cas, params.n_con
+            if n_cas is None or n_con is None:
+                raise ValueError(
+                    f"traits.{wildcards.trait} has format=simple but is "
+                    "missing n_cas/n_con in config.yaml"
+                )
+            neff = 4.0 / (1.0 / n_cas + 1.0 / n_con)
+            df["Neff"] = neff
+            src = f"4/(1/{n_cas} + 1/{n_con}) = {neff:.1f} (study-level)"
+        else:
+            raise ValueError(f"Unknown format '{params.fmt}' for trait {wildcards.trait}")
+
+        # -------------------------------------------------------------------
+        # Fail loudly on an implausible N rather than let munge_sumstats
+        # silently delete most of the file via its N.quantile(0.9)/1.5 filter.
+        # -------------------------------------------------------------------
+        nmin, nmax = float(df["Neff"].min()), float(df["Neff"].max())
+        if not (nmin > 100):
+            raise ValueError(
+                f"traits.{wildcards.trait}: computed Neff is implausible "
+                f"(min={nmin:.4g}, max={nmax:.4g}) using {src}. A sample size "
+                "cannot be that small -- the wrong column was selected."
+            )
+        print(f"[prep_gwas] {wildcards.trait}: Neff via {src}; "
+              f"range [{nmin:.1f}, {nmax:.1f}]; {len(df):,} rows")
+
+        df.to_csv(output[0], sep="\t", index=False)
+
+# ---------------------------------------------------------------------------
+# 0b. munge_sumstats.py — generic across traits now that prep_gwas
+#     guarantees a Neff column and writes uncompressed plain-text output
+#     (this ldsc branch has a Python3 bytes/str bug reading gzipped input
+#     directly, so plain text sidesteps it entirely).
+# ---------------------------------------------------------------------------
+rule munge_sumstats:
+    input:
+        sumstats = "gwas/{trait}/{trait}.prep",
+        merge_alleles = config["hm3_snplist"]
+    output:
+        "gwas/{trait}/{trait}.munged.sumstats.gz"
+    params:
+        out_prefix = "gwas/{trait}/{trait}.munged",
+        info_flag = lambda wc: (
+            "--info INFO" if "INFO" in
+            __import__("pandas").read_csv(
+                config["traits"][wc.trait]["raw_file"], sep=r"\s+", nrows=0
+            ).columns else ""
+        )
+    log:
+        "logs/munge_sumstats/{trait}.log"
+    shell:
+        """
+        python {config[ldsc_dir]}/munge_sumstats.py \
+            --sumstats {input.sumstats} \
+            --N-col Neff \
+            --snp SNP \
+            --a1 A1 \
+            --a2 A2 \
+            --p P \
+            {params.info_flag} \
+            --merge-alleles {input.merge_alleles} \
+            --out {params.out_prefix} \
+            --chunksize 500000 > {log} 2>&1
+        """
+
+# ---------------------------------------------------------------------------
+# 1. liftOver hg38 -> hg19 (chr-prefix preserved on purpose, see README)
+#    Trait-independent — computed once per celltype, shared across traits.
+# ---------------------------------------------------------------------------
+rule liftover:
+    input:
+        bed = lambda wc: f"{config['ccre_hg38_dir']}/{wc.celltype}.bed.txt"
+    output:
+        mapped = "cCRE/hg19/{celltype}.hg19.bed",
+        unmapped = "cCRE/hg19/{celltype}.unmapped.bed"
+    params:
+        chain = config["chain_file"]
+    log:
+        "logs/liftover/{celltype}.log"
+    shell:
+        """
+        liftOver {input.bed} {params.chain} {output.mapped} {output.unmapped} > {log} 2>&1
+        """
+
+rule sort_bed:
+    input:
+        "cCRE/hg19/{celltype}.hg19.bed"
+    output:
+        "cCRE/hg19/{celltype}.hg19.sorted.bed"
+    shell:
+        "sort -k1,1 -k2,2n {input} > {output}"
+
+# ---------------------------------------------------------------------------
+# 2. make_annot.py — one annot file per celltype per chromosome.
+#    Trait-independent — computed once per celltype, shared across traits.
+#    NOTE: bed file MUST be chr-prefixed because this ldsc branch's
+#    make_annot.py internally builds bim intervals as 'chr'+str(CHR)
+#    before intersecting (see ldscore/make_annot.py L22).
+# ---------------------------------------------------------------------------
+rule make_annot:
+    input:
+        bed = "cCRE/hg19/{celltype}.hg19.sorted.bed",
+        bim = lambda wc: f"{config['plink_prefix']}.{wc.chr}.bim"
+    output:
+        "annot/{celltype}/{celltype}.{chr}.annot.gz"
+    log:
+        "logs/make_annot/{celltype}.{chr}.log"
+    shell:
+        """
+        python {config[ldsc_dir]}/make_annot.py \
+            --bed-file {input.bed} \
+            --bimfile {input.bim} \
+            --annot-file {output} > {log} 2>&1
+        """
+
+# ---------------------------------------------------------------------------
+# 2b. Single-column HapMap3 SNP list for --print-snps.
+# ---------------------------------------------------------------------------
+rule hm3_ids_only:
+    input:
+        config["hm3_snplist"]
+    output:
+        config["hm3_snplist_ids_only"]
+    shell:
+        "awk 'NR>1{{print $1}}' {input} > {output}"
+
+# ---------------------------------------------------------------------------
+# 3. ldsc.py --l2 — per-chromosome LD scores, HapMap3-restricted output.
+#    Trait-independent — computed once per celltype, shared across traits.
+# ---------------------------------------------------------------------------
+rule l2_score:
+    input:
+        annot = "annot/{celltype}/{celltype}.{chr}.annot.gz",
+        bfile_bed = lambda wc: f"{config['plink_prefix']}.{wc.chr}.bed",
+        snplist = config["hm3_snplist_ids_only"]
+    output:
+        ldscore = "annot/{celltype}/{celltype}.{chr}.l2.ldscore.gz",
+        M = "annot/{celltype}/{celltype}.{chr}.l2.M",
+        M_5_50 = "annot/{celltype}/{celltype}.{chr}.l2.M_5_50"
+    params:
+        bfile = lambda wc: f"{config['plink_prefix']}.{wc.chr}",
+        out = "annot/{celltype}/{celltype}.{chr}"
+    log:
+        "logs/l2/{celltype}.{chr}.log"
+    threads: 1
+    shell:
+        """
+        python {config[ldsc_dir]}/ldsc.py \
+            --l2 \
+            --bfile {params.bfile} \
+            --ld-wind-cm 1 \
+            --annot {input.annot} \
+            --thin-annot \
+            --print-snps {input.snplist} \
+            --out {params.out} > {log} 2>&1
+        """
+
+# ---------------------------------------------------------------------------
+# 4. ldsc.py --h2 — partitioned heritability regression, per trait.
+#    Requires the parse.py patch at line 223
+#    (get_present_chrs(fh_list[0], ...) not (fh, ...)) for --overlap-annot
+#    to work with multiple comma-separated --ref-ld-chr prefixes.
+# ---------------------------------------------------------------------------
+rule h2_regression:
+    input:
+        sumstats = lambda wc: config["traits"][wc.trait].get(
+            "premunged_file", f"gwas/{wc.trait}/{wc.trait}.munged.sumstats.gz"
+        ),
+        celltype_l2 = lambda wc: expand(
+            "annot/{{celltype}}/{{celltype}}.{chr}.l2.ldscore.gz", chr=CHRS
+        ),
+        weights = config["weights_ld_chr"] + "1.l2.ldscore.gz",
+        frq = config["frqfile_chr"] + "1.frq"
+    output:
+        "results/{trait}/{celltype}_{baseline}.results"
+    params:
+        baseline_prefix = lambda wc: f"{config['baseline_dir']}/{wc.baseline}/{BASELINE_PREFIX[wc.baseline]}.",
+        celltype_prefix = "annot/{celltype}/{celltype}.",
+        weights_prefix = config["weights_ld_chr"],
+        frq_prefix = config["frqfile_chr"],
+        out = "results/{trait}/{celltype}_{baseline}"
+    log:
+        "logs/h2/{trait}/{celltype}_{baseline}.log"
+    shell:
+        """
+        python {config[ldsc_dir]}/ldsc.py \
+            --h2 {input.sumstats} \
+            --ref-ld-chr {params.baseline_prefix},{params.celltype_prefix} \
+            --w-ld-chr {params.weights_prefix} \
+            --overlap-annot \
+            --frqfile-chr {params.frq_prefix} \
+            --out {params.out} \
+            --print-coefficients > {log} 2>&1
+        """
+
+# ---------------------------------------------------------------------------
+# 5. Aggregate the target-annotation row (last row, "L2_1") from every
+#    celltype x baseline .results file into one summary table, per trait.
+# ---------------------------------------------------------------------------
+rule summarize:
+    input:
+        lambda wc: expand(
+            "results/{trait}/{celltype}_{baseline}.results",
+            trait=[wc.trait], celltype=CELLTYPES, baseline=BASELINES
+        )
+    output:
+        "results/{trait}/summary_table.tsv"
+    run:
+        import csv
+        with open(output[0], "w", newline="") as out_f:
+            writer = csv.writer(out_f, delimiter="\t")
+            writer.writerow([
+                "CellType", "Model", "Prop_SNPs", "Prop_h2",
+                "Enrichment", "Enrichment_p", "Coef_z"
+            ])
+            for celltype in CELLTYPES:
+                for baseline in BASELINES:
+                    fpath = f"results/{wildcards.trait}/{celltype}_{baseline}.results"
+                    with open(fpath) as f:
+                        rows = list(csv.reader(f, delimiter="\t"))
+                    header, last = rows[0], rows[-1]
+                    idx = {name: i for i, name in enumerate(header)}
+                    writer.writerow([
+                        celltype, baseline,
+                        last[idx["Prop._SNPs"]],
+                        last[idx["Prop._h2"]],
+                        last[idx["Enrichment"]],
+                        last[idx["Enrichment_p"]],
+                        last[idx["Coefficient_z-score"]],
+                    ])
+
+# ---------------------------------------------------------------------------
+# 6. Multiple-testing correction, per trait.
+#    Matches the CATlas paper's own approach (Li et al.): Benjamini-
+#    Hochberg FDR on LDSC coefficient p-values (tau), per cell type,
+#    marking FDR<0.05/0.01/0.001 with */**/***. Bonferroni also reported
+#    (Finucane et al.'s primary threshold). Corrected separately per
+#    baseline model (v1.2 recommended for tau significance).
+# ---------------------------------------------------------------------------
+rule significance_testing:
+    input:
+        "results/{trait}/summary_table.tsv"
+    output:
+        "results/{trait}/summary_table_corrected.tsv"
+    run:
+        import csv
+        from math import erfc, sqrt
+
+        def two_sided_p_from_z(z):
+            return erfc(abs(float(z)) / sqrt(2))
+
+        def bh_fdr(pvals):
+            n = len(pvals)
+            order = sorted(range(n), key=lambda i: pvals[i])
+            q = [0.0] * n
+            prev = 1.0
+            for rank, idx in enumerate(reversed(order), start=1):
+                i = order[n - rank]
+                p = pvals[i]
+                bh_val = p * n / (n - rank + 1)
+                prev = min(prev, bh_val)
+                q[i] = prev
+            return q
+
+        with open(input[0]) as f:
+            rows = list(csv.DictReader(f, delimiter="\t"))
+
+        for row in rows:
+            row["Coefficient_p"] = two_sided_p_from_z(row["Coef_z"])
+
+        for baseline in BASELINES:
+            subset = [r for r in rows if r["Model"] == baseline]
+            n = len(subset)
+            pvals = [r["Coefficient_p"] for r in subset]
+            qvals = bh_fdr(pvals)
+            for r, q in zip(subset, qvals):
+                r["FDR_q"] = q
+                r["Bonferroni_p"] = min(1.0, r["Coefficient_p"] * n)
+                r["Sig_FDR"] = (
+                    "***" if q < 0.001 else
+                    "**" if q < 0.01 else
+                    "*" if q < 0.05 else
+                    ""
+                )
+                r["Sig_Bonferroni"] = "*" if r["Bonferroni_p"] < 0.05 else ""
+
+        with open(output[0], "w", newline="") as out_f:
+            fieldnames = [
+                "CellType", "Model", "Prop_SNPs", "Prop_h2", "Enrichment",
+                "Enrichment_p", "Coef_z", "Coefficient_p", "Bonferroni_p",
+                "Sig_Bonferroni", "FDR_q", "Sig_FDR"
+            ]
+            writer = csv.DictWriter(out_f, fieldnames=fieldnames, delimiter="\t")
+            writer.writeheader()
+            rows_sorted = sorted(rows, key=lambda r: (r["Model"], r["FDR_q"]))
+            for r in rows_sorted:
+                writer.writerow(r)
+
+# ---------------------------------------------------------------------------
+# 7. Genetic correlation (ldsc.py --rg) across all primary traits
+#
+#    For N primary traits this produces N*(N-1)/2 pairwise comparisons.
+#
+#    By default:
+#      RG_TRAITS = TRAITS
+#
+#    To restrict the analysis, add to config.yaml:
+#      rg_traits:
+#        - OCD
+#        - SCZ
+#        - TS
+#        - AN
+#        - ADHD
+#
+#    This uses each trait's own munged summary statistics and the same
+#    non-partitioned EUR LD-score reference for standard LDSC --rg.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 6b. Drop allele-incompatible SNPs before --rg.
+#
+#     Build gwas/exclude_snps.txt with:   python3 find_bad_snp.py
+#     (an empty or absent file is fine -- then this is a straight copy).
+#
+#     Applies to EVERY trait so all pairs use an identical SNP set, which is
+#     also better practice than filtering only the pair that happened to fail.
+# ---------------------------------------------------------------------------
+rule drop_incompatible_snps:
+    input:
+        sumstats = lambda wc: sumstats_for(wc.trait)
+    output:
+        "gwas/rg_filtered/{trait}.sumstats.gz"
+    params:
+        exclude = EXCLUDE_SNPS
+    log:
+        "logs/rg_filter/{trait}.log"
+    run:
+        import gzip, os, shutil
+
+        bad = set()
+        if params.exclude and os.path.exists(params.exclude):
+            with open(params.exclude) as f:
+                bad = {ln.strip() for ln in f if ln.strip()
+                       and not ln.startswith("#")}
+
+        os.makedirs(os.path.dirname(output[0]), exist_ok=True)
+        os.makedirs(os.path.dirname(log[0]), exist_ok=True)
+
+        if not bad:
+            shutil.copyfile(input.sumstats, output[0])
+            with open(log[0], "w") as lg:
+                lg.write("no exclude list -- copied unchanged\n")
+        else:
+            kept = dropped = 0
+            with gzip.open(input.sumstats, "rt") as fin, \
+                 gzip.open(output[0], "wt") as fout:
+                header = fin.readline()
+                fout.write(header)
+                snp_idx = header.split().index("SNP")
+                for line in fin:
+                    parts = line.split()
+                    if parts and parts[snp_idx] in bad:
+                        dropped += 1
+                        continue
+                    fout.write(line)
+                    kept += 1
+            with open(log[0], "w") as lg:
+                lg.write(f"excluded {dropped} SNP(s); kept {kept}\n")
+
+rule genetic_correlation:
+    input:
+        trait1 = lambda wc: rg_sumstats_for(wc.trait1),
+        trait2 = lambda wc: rg_sumstats_for(wc.trait2)
+    output:
+        "results/rg/{trait1}_vs_{trait2}.log"
+    params:
+        ld_chr = config["rg_ld_chr"],
+        out = "results/rg/{trait1}_vs_{trait2}"
+    log:
+        "logs/rg/{trait1}_vs_{trait2}.log"
+    shell:
+        """
+        python {config[ldsc_dir]}/ldsc.py \
+            --rg {input.trait1},{input.trait2} \
+            --ref-ld-chr {params.ld_chr} \
+            --w-ld-chr {params.ld_chr} \
+            --out {params.out} > {log} 2>&1
+        cp {log} {output}
+        """
+
+rule rg_summary:
+    input:
+        RG_LOGS
+    output:
+        "results/rg/rg_summary.tsv"
+    run:
+        import csv, re
+
+        rows = []
+
+        for trait1, trait2 in RG_PAIRS:
+            fpath = f"results/rg/{trait1}_vs_{trait2}.log"
+
+            with open(fpath) as f:
+                text = f.read()
+
+            # The CBIIT LDSC output contains a final block like:
+            # Genetic Correlation: 0.39 (0.03)
+            # Z-score: 10.1
+            # P: 1.2e-23
+            m = re.search(
+                r"Genetic Correlation:\s+([-\d.eE+]+)\s+\(([-\d.eE+]+)\).*?"
+                r"Z-score:\s+([-\d.eE+]+).*?"
+                r"P:\s+([0-9.eE+\-]+)",
+                text,
+                re.S,
+            )
+
+            if m:
+                rows.append({
+                    "Trait1": trait1,
+                    "Trait2": trait2,
+                    "rg": m.group(1),
+                    "se": m.group(2),
+                    "z": m.group(3),
+                    "p": m.group(4),
+                })
+            else:
+                rows.append({
+                    "Trait1": trait1,
+                    "Trait2": trait2,
+                    "rg": "PARSE_ERROR",
+                    "se": "",
+                    "z": "",
+                    "p": "",
+                })
+
+        with open(output[0], "w", newline="") as out_f:
+            writer = csv.DictWriter(
+                out_f,
+                fieldnames=[
+                    "Trait1", "Trait2", "rg", "se", "z", "p"
+                ],
+                delimiter="\t"
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+
