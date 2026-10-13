@@ -1,0 +1,134 @@
+# Paths — adjust to match your OCD/s_ldsc layout.
+# All relative paths are relative to wherever you run `snakemake` from
+# (recommended: run from OCD/s_ldsc/, with this Snakefile + config.yaml copied there).
+
+ldsc_dir: "../../ldsc"                                  # cloned ldsc repo (with the parse.py patch applied)
+
+# --- inputs you already have (trait-independent) ---
+ccre_hg38_dir: "cCRE/hg38"                               # raw CATlas cCRE .bed.txt files, one per celltype
+chain_file: "ldsc_ref/hg38ToHg19.over.chain.gz"
+
+plink_prefix: "ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC"   # -> {prefix}.{chr}.bed/bim/fam
+hm3_snplist: "ldsc_ref/w_hm3.snplist"                    # original 3-column file (SNP A1 A2), from zenodo.org/records/7773502
+hm3_snplist_ids_only: "ldsc_ref/w_hm3.snplist.ids_only"  # auto-generated single-column version (see hm3_ids_only rule)
+
+baseline_dir: "ldsc_ref"                                 # contains baseline_v1.2/ and baselineLD_v2.2/ subfolders
+weights_ld_chr: "ldsc_ref/weights_hm3_no_MHC/weights.hm3_noMHC."
+frqfile_chr: "ldsc_ref/1000G_Phase3_frq/1000G.EUR.QC."
+
+# --- GWAS traits ---
+# Each trait needs a raw_file + format. Two formats supported:
+#   "daner"  -> standard PGC daner file (has per-SNP FRQ_A/FRQ_U + N columns).
+#               prep_gwas computes Neff/MAF automatically, no manual prep needed.
+#   "simple" -> minimal PGC format with a FIXED total N, no per-SNP FRQ
+#               (e.g. PGC-TS Yu et al. 2019: SNP CHR BP A1 A2 INFO OR SE P).
+#               Requires n_cas/n_con below; Neff is computed once and applied
+#               to every row.
+# Just feed the raw downloaded file directly — prep_gwas handles both
+# formats automatically, no manual pre-processing needed on your end.
+traits:
+  OCD:
+    format: daner
+    raw_file: "gwas/OCD/daner_OCD_full_wo23andMe_190522.gz"
+  SCZ:
+    format: daner
+    raw_file: "gwas/SCZ/daner_PGC_SCZ52_0513a.hq2.gz"
+  TS:
+    format: simple
+    raw_file: "gwas/TS/TS_Oct2018.gz"
+    n_cas: 4819
+    n_con: 9488
+  # --- premunged: already-munged external sumstats, no prep needed ---
+  # skips prep_gwas/munge_sumstats entirely; h2_regression reads
+  # premunged_file directly. raw_file not needed for these.
+  ADHD:
+    format: premunged
+    premunged_file: "gwas/external/PASS.Attention_Deficit_Hyperactivity_Disorder_ADHD.Demontis2023.sumstats.gz"
+
+  Anorexia:
+    format: premunged
+    premunged_file: "gwas/external/PASS.Anorexia_Nervosa.Watson2019.sumstats.gz"
+
+# --- cell types to run ---
+celltypes:
+  - MSN
+  - PVALB
+  - SST
+  - VIP
+  - LAMP5_1
+  - LAMP5_2
+  - SNCG
+  - ITL23
+  - ITL5
+  - ITL6_1
+  - SUB
+  - ASCT
+  - MGC
+  - OPC
+  - ITL34
+  - ACBGM
+  - AMY
+  - BFEXA
+  - BNGA
+  - CBGA
+  - CBGRC
+  - CHO
+  - CNGA
+  - CT
+  - EC
+  - ET
+  - FOXP2
+  - ITL4
+  - ITL6_2
+  - ITL45
+  - ITV1C
+  - L6B
+  - MBGA
+  - NP
+  - OGC
+  - PER
+  - PRERC
+  - PV_ChCs
+  - PVALB
+  - SEPGA
+  - SIGA
+  - SMC
+  - SST_CHODL
+  - THMGA
+
+
+# --- genetic correlation (ldsc.py --rg): OCD vs comorbid/related traits ---
+# rg_base_trait must match a key already defined under `traits:` above
+# (uses that trait's own gwas/{trait}/{trait}.munged.sumstats.gz).
+# rg_comparison_traits: already-munged EXTERNAL sumstats files (from the
+# Price-lab bundle or traits_indep107 collection) used as-is, no prep
+# needed. Adjust paths to wherever you actually saved these downloads.
+rg_base_trait: "OCD"
+rg_ld_chr: "ldsc_ref/eur_w_ld_chr/"   # dedicated non-partitioned LD scores
+
+# If you don't specify rg_traits, the new Snakefile uses every trait in TRAITS.
+rg_traits:
+  - OCD
+  - SCZ
+  - TS
+  - Anorexia
+  - ADHD
+
+rg_comparison_traits:
+  ADHD: "gwas/external/PASS.Attention_Deficit_Hyperactivity_Disorder_ADHD.Demontis2023.sumstats.gz"
+  Depression: "gwas/external/PASS.Depression.Howard2019.sumstats.gz"
+  BipolarDisorder: "gwas/external/PASS.Bipolar_Disorder_ALL.Mullins2021.sumstats.gz"
+  Schizophrenia2022: "gwas/external/PASS.Schizophrenia.Trubetskoy2022.sumstats.gz"
+  TouretteSyndrome: "gwas/external/PASS.Tourette_Syndrome.Yu2019.sumstats.gz"
+  Insomnia: "gwas/external/PASS.Insomnia.Watanabe2022.sumstats.gz"
+  Anorexia: "gwas/external/PASS.Anorexia_Nervosa.Watson2019.sumstats.gz"
+  BMI: "gwas/external/PASS.BMI.Yengo2018.sumstats.gz"
+  Height: "gwas/external/PASS.Height.Yengo2022.sumstats.gz"
+  Alcohol: "gwas/external/PASS.Alcohol_use.SanchezRoige2018.sumstats.gz"
+  Cigarettes: "gwas/external/PASS.Cigarettes_Per_Day.Liu2019.sumstats.gz"
+  Endometriosis: "gwas/external/PASS.Endometriosis.Rahmioglu2023.sumstats.gz"
+  Lupus: "gwas/external/PASS.Lupus.Bentham2015.sumstats.gz"
+  Physical_Activity: "gwas/external/PASS.Physical_Activity.Wang2022.sumstats.gz"
+  Reaction_Time: "gwas/external/PASS.Reaction_Time.Davies2018.sumstats.gz"
+  Sleep_Duration: "gwas/external/PASS.Sleep_Duration.Dashti2019.sumstats.gz"
+
