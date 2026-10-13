@@ -1,0 +1,579 @@
+---
+title: "S-LDSC OCD on cCRE from snATAC-seq"
+format: html
+---
+
+# Data
+
+GWAS data for OCD was downloaded from :
+
+- The study: Genome-wide analyses identify 30 loci associated with obsessive–compulsive disorder
+- The meta-analyzed summary statistics (not including 23andMe data) are available from the Psychiatric Genomics Consortium Download page (<https://www.med.unc.edu/pgc/download-results/>)
+- It can be **rendered** into HTML, PDF, and more
+- Learn more at: <https://www.nature.com/articles/s41588-025-02189-z#data-availability>
+- https://pgc.unc.edu/for-researchers/download-results/
+
+
+cCRE beds from snATAC seq was downloaded from CATlas:
+
+- The study: A comparative atlas of single-cell chromatin accessibility in the human brain
+- CATlas link of cCRE bed files: <https://decoder-genetics.wustl.edu/catlasv1/humanbrain/data/cCREs/subclass/>
+- Custom code and scripts used for analysis can be accessed here: <https://github.com/yal054/snATACutils> and <https://github.com/r3fang/SnapATAC>
+- Learn more at: <https://pmc.ncbi.nlm.nih.gov/articles/PMC10852054/#SM1>
+
+# Installing LDSC
+
+First cloning the python3.9 branch of ldsc github:
+
+```python
+git clone -b ldsc39 https://github.com/CBIIT/ldsc.git
+```
+::: {.callout-warning}
+Had to change the conda config from default. 
+
+```python
+conda create --name ldsc39 python=3.9
+```
+Collecting package metadata (current_repodata.json): failed
+UnavailableInvalidChannel: HTTP 403 FORBIDDEN 
+
+```python
+conda config --remove channels defaults                           
+conda config --add channels conda-forge                           
+```
+:::
+
+After creating environment, we install needed packages.
+
+```python
+pip install -r requirements.txt  
+```
+
+## Downloading LDSC data
+
+```bash
+wget https://data.broadinstitute.org/alkesgroup/LDSCORE/eur_w_ld_chr.tar.bz2
+```
+::: {.callout-warning}
+Connecting to data.broadinstitute.org (data.broadinstitute.org)|69.173.68.137|:443... failed: Resource temporarily unavailable.
+Due to excessive data transfer costs, the original directory (<https://data.broadinstitute.org/alkesgroup/LDSCORE>) is now available on a requester-pays basis at 
+https://console.cloud.google.com/storage/browser/broad-alkesgroup-public-requester-pays. 
+The downloader will pay transfer costs of $0.01-$0.15 per GB (depending on region) to google cloud.
+
+A minimal set of files necessary to run LDSC are available for free acecss at https://doi.org/10.5281/zenodo.7768714.
+
+baselineLF_v2.2.UKB.tar.gz is available for free access at https://broad-alkesgroup-ukbb-ld.s3.amazonaws.com/UKBB_LD/baselineLF_v2.2.UKB.tar.gz as
+part of the AWS Open Data Project.
+:::
+
+The following files were downloaded from <https://doi.org/10.5281/zenodo.7768714>
+
+
+w_hm3.snplist was downloaded from: <https://zenodo.org/records/7773502>
+eur_w_ld_chr was downloaded (needed for the genetic correlation between traits) from: <https://zenodo.org/records/8182036>
+
+# Checking GWAS data
+
+## md5checksum
+Comparing the string to verify the integrity of data by ensuring that the data has not been altered or corrupted.
+
+```python
+md5sum daner_OCD_full_wo23andMe_190522.gz
+```
+
+zcat daner_OCD_full_wo23andMe_190522.gz | head -3
+CHR     SNP     BP      A1      A2      FRQ_A_23493     FRQ_U_1114613   INFO    OR      SE      P       ngt     Direction       HetISqt HetDf   HetPVa  Nca     Nco     Neff_half
+8       rs117278216     100516008       T       C       0.983   0.984   0.926   0.99491 0.0458  0.9116  0       -+-+?-?++?---+--?+????+????     0.0     14      0.6124  20570   1036589 34049.58
+8       rs62513865      101592213       C       T       0.926   0.918   0.967   1.01613 0.0203  0.4319  0       --++-+---++++-+-?-??--+++--     40.6    23      0.0213  23170   1114290 37925.99
+ (anaconda3)  armaiti  /mnt/h/projects/ocd/s-ldsc/28707155  zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1{print $(NF-2), $(NF-1), $NF}' | head
+# columns: Nca Nco Neff_half — confirm Neff_half ≈ 4*Nca*Nco/(2*(Nca+Nco))
+20570 1036589 34049.58
+23170 1114290 37925.99
+23438 1114558 38193.99
+17027 652817 25814.81
+17350 653140 26137.81
+23362 1113255 38010.04
+16975 651171 25714.00
+22860 1107725 37341.47
+23493 1114613 38248.99
+22916 1112414 37478.50
+ (anaconda3)  armaiti  /mnt/h/projects/ocd/s-ldsc/28707155  zcat daner_OCD_full_wo23andMe_190522.gz | wc -l
+6791633
+ (anaconda3)  armaiti  /mnt/h/projects/ocd/s-ldsc/28707155  zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1{print $8}' | sort -n | awk '
+  {a[NR]=$1} END{print "min="a[1], "median="a[int(NR/2)], "max="a[NR]}'
+# INFO column distribution
+min=0.803 median=0.981 max=1
+ (anaconda3)  armaiti  /mnt/h/projects/ocd/s-ldsc/28707155  zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1 && $8>=0.9' | wc -l
+# how many SNPs pass INFO >= 0.9 (munge_sumstats.py will filter this automatically if you pass --info-min 0.9)
+6688281
+ (anaconda3)  armaiti  /mnt/h/projects/ocd/s-ldsc/28707155  zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1{print $11}' > /tmp/pvals.txt
+python3 -c "
+import numpy as np
+from scipy.stats import chi2
+p = np.loadtxt('/tmp/pvals.txt')
+p = p[(p>0)&(p<=1)]
+chisq = chi2.isf(p, 1)
+print('N SNPs:', len(p))
+print('lambda_GC:', np.median(chisq)/chi2.ppf(0.5,1))
+"
+N SNPs: 6791632
+lambda_GC: 1.1882138956814554
+
+## No INFO score SNPs
+How many SNPs have INFO == exactly 1?
+zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1 && $8==1' | wc -l
+51718
+How many SNPs with INFO<1 pass the >=0.9 threshold?
+zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1 && $8<1 && $8>=0.9' | wc -l
+
+6636563
+Of SNPs with INFO==1, how many have ngt>0 (genotyped in at least one study)?
+zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1 && $8==1 && $12>0' | wc -l
+
+23842
+Of SNPs with INFO==1, how many have ngt==0 (imputed in all studies, but INFO still set to 1)?
+zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1 && $8==1 && $12==0' | wc -l
+27876
+
+## Prepare input file
+Create a clean Neff column and a single MAF column. Neff = 2 × Neff_half recovers the true per-SNP effective sample size. MAF = (FRQ_A + FRQ_U) / 2 averages case and control frequencies as a proxy for population MAF.
+
+```bash
+zcat daner_OCD_full_wo23andMe_190522.gz | \
+awk 'BEGIN{OFS="\t"}
+     NR==1 {print $0, "Neff", "MAF"; next}
+     {print $0, 2*$NF, ($6+$7)/2}' | \
+gzip > daner_OCD_wo23andMe.prep.gz
+```
+
+# LDSC pipeline
+
+## Run munge_sumstats
+
+```bash
+python ../../ldsc/munge_sumstats.py \
+    --sumstats gwas/daner_OCD_wo23andMe.prep \
+    --N-col Neff \
+    --snp SNP \
+    --a1 A1 \
+    --a2 A2 \
+    --p P \
+    --merge-alleles ldsc_ref/w_hm3.snplist \
+    --out daner_OCD_wo23andMe.munged \
+    --chunksize 500000
+```
+
+*********************************************************************
+* LD Score Regression (LDSC)
+* Version 3.0.1
+* (C) 2014-2019 Brendan Bulik-Sullivan and Hilary Finucane
+* Broad Institute of MIT and Harvard / MIT Department of Mathematics
+* GNU General Public License v3
+*********************************************************************
+
+{'SNP': 'SNP', 'A1': 'A1', 'A2': 'A2', 'INFO': 'INFO', 'OR': 'OR', 'P': 'P', 'Neff': 'N', 'MAF': 'FRQ'}
+Interpreting column names as follows:
+SNP:    Variant ID (e.g., rs number)
+A1:     Allele 1, interpreted as ref allele for signed sumstat.
+A2:     Allele 2, interpreted as non-ref allele for signed sumstat.
+INFO:   INFO score (imputation quality; higher --> better imputation)
+OR:     Odds ratio (1 --> no effect; above 1 --> A1 is risk increasing)
+P:      p-Value
+Neff:   Sample size
+MAF:    Allele frequency
+
+Reading list of SNPs for allele merge from ldsc_ref/w_hm3.snplist
+Read 1217311 SNPs for allele merge.
+Reading sumstats from gwas/daner_OCD_wo23andMe.prep into memory 500000 SNPs at a time.
+.............. done
+Read 6791632 SNPs from --sumstats file.
+Removed 5642711 SNPs not in --merge-alleles.
+Removed 0 SNPs with missing values.
+Removed 2021 SNPs with INFO <= 0.9.
+Removed 0 SNPs with MAF <= 0.01.
+Removed 0 SNPs with out-of-bounds p-values.
+Removed 0 variants that were not SNPs or were strand-ambiguous.
+1146900 SNPs remain.
+Removed 0 SNPs with duplicated rs numbers (1146900 SNPs remain).
+Removed 97472 SNPs with N < 50998.666666666664 (1049428 SNPs remain).
+Median value of OR was 0.9997, which seems sensible.
+/mnt/h/projects/ocd/s_ldsc/../../ldsc/munge_sumstats.py:419: FutureWarning: Setting an item of incompatible dtype is deprecated and will raise an error in a future version of pandas. Value '[True True True ... True True True]' has dtype incompatible with bool, please explicitly cast to a compatible dtype first.
+  jj[ii] = match
+Removed 0 SNPs whose alleles did not match --merge-alleles (1049428 SNPs remain).
+Writing summary statistics for 1217311 SNPs (1049428 with nonmissing beta) to daner_OCD_wo23andMe.munged.sumstats.gz.
+
+Metadata:
+Mean chi^2 = 1.248
+Lambda GC = 1.226
+Max chi^2 = 37.327
+2 Genome-wide significant SNPs (some may have been removed by filtering).
+
+Conversion finished at Tue Jul  7 15:51:51 2026
+Total time elapsed: 29.68s
+
+## Lifting over the cCRE from hg38 to hg19
+
+```bash
+wget https://hgdownload.soe.ucsc.edu/goldenPath/hg38/liftOver/hg38ToHg19.over.chain.gz
+conda install -n [env_name] -c bioconda ucsc-liftover
+```
+```bash
+for bedfile in hg38/*.bed.txt; do
+    f=$(basename "$bedfile" .bed.txt)
+    liftOver \
+        "$bedfile" \
+        ../ldsc_ref/hg38ToHg19.over.chain.gz \
+        hg19/${f}.hg19.bed \
+        hg19/${f}.unmapped.bed
+    n_in=$(wc -l < "$bedfile")
+    n_mapped=$(wc -l < hg19/${f}.hg19.bed)
+    n_unmapped=$(grep -c '^chr' hg19/${f}.unmapped.bed)
+    echo "${f}: ${n_in} input, ${n_mapped} mapped, ${n_unmapped} unmapped"
+done | tee liftover_summary.tx
+
+for f in hg19/*.hg19.bed; do
+    sort -k1,1 -k2,2n "$f" > "${f%.bed}.sorted.bed"
+done
+```
+AMY: 93699 input, 93523 mapped, 176 unmapped
+ITL4: 132119 input, 131864 mapped, 255 unmapped
+ACBGM: 26737 input, 26686 mapped, 51 unmapped
+ASCNT: 78183 input, 78005 mapped, 178 unmapped
+ASCT: 141935 input, 141542 mapped, 393 unmapped
+BFEXA: 39648 input, 39578 mapped, 70 unmapped
+BNGA: 16635 input, 16611 mapped, 24 unmapped
+CBGA: 18076 input, 18050 mapped, 26 unmapped
+CBGRC: 91384 input, 91188 mapped, 196 unmapped
+CHO: 9995 input, 9987 mapped, 8 unmapped
+CNGA: 68707 input, 68564 mapped, 143 unmapped
+CT: 108570 input, 108378 mapped, 192 unmapped
+EC: 852 input, 852 mapped, 0 unmapped
+ET: 10270 input, 10257 mapped, 13 unmapped
+FOXP2: 49645 input, 49565 mapped, 80 unmapped
+ITL23: 219434 input, 219071 mapped, 363 unmapped
+ITL34: 126220 input, 125993 mapped, 227 unmapped
+ITL45: 95260 input, 95088 mapped, 172 unmapped
+ITL5: 166208 input, 165931 mapped, 277 unmapped
+ITL6_1: 143376 input, 143138 mapped, 238 unmapped
+ITL6_2: 100016 input, 99850 mapped, 166 unmapped
+ITV1C: 148049 input, 147822 mapped, 227 unmapped
+L6B: 98808 input, 98663 mapped, 145 unmapped
+LAMP5_1: 79672 input, 79540 mapped, 132 unmapped
+LAMP5_2: 77176 input, 77047 mapped, 129 unmapped
+MBGA: 27875 input, 27813 mapped, 62 unmapped
+MGC: 107039 input, 106728 mapped, 311 unmapped
+MSN: 147978 input, 147731 mapped, 247 unmapped
+NP: 61092 input, 61015 mapped, 77 unmapped
+OGC: 137357 input, 136972 mapped, 385 unmapped
+OPC: 132112 input, 131843 mapped, 269 unmapped
+PER: 92 input, 92 mapped, 0 unmapped
+PRERC: 81280 input, 81154 mapped, 126 unmapped
+PVALB: 125889 input, 125672 mapped, 217 unmapped
+PV_ChCs: 63950 input, 63828 mapped, 122 unmapped
+SEPGA: 2630 input, 2618 mapped, 12 unmapped
+SIGA: 7642 input, 7630 mapped, 12 unmapped
+SMC: 22577 input, 22528 mapped, 49 unmapped
+SNCG: 63569 input, 63451 mapped, 118 unmapped
+SST: 109203 input, 109013 mapped, 190 unmapped
+SST_CHODL: 41222 input, 41145 mapped, 77 unmapped
+SUB: 3432 input, 3425 mapped, 7 unmapped
+THMGA: 20522 input, 20487 mapped, 35 unmapped
+VIP: 108955 input, 108758 mapped, 197 unmapped
+
+## Preparing ldsc reference files
+
+```bash
+cd ldsc_ref
+mkdir -p 1000G_EUR_Phase3_plink
+tar -xzvf 1000G_Phase3_plinkfiles.tgz -C 1000G_EUR_Phase3_plink --strip-components=1
+mkdir -p weights_hm3_no_MHC
+tar -xzvf 1000G_Phase3_weights_hm3_no_MHC.tgz -C weights_hm3_no_MHC --strip-components=1
+mkdir -p baseline_v1.2
+tar -xzvf 1000G_Phase3_baseline_v1.2_ldscores.tgz -C baseline_v1.2 --strip-components=1
+mkdir -p baselineLD_v2.2
+tar -xzvf 1000G_Phase3_baselineLD_v2.2_ldscores.tgz -C baselineLD_v2.2 --strip-components=1
+```
+
+## Making annotation files
+
+Make sure to have pybedtools installed.
+```bash
+conda install -c bioconda -c conda-forge pybedtools bedtools
+```
+
+```bash
+mkdir -p annot
+for bedfile in cCRE/hg19/*.hg19.sorted.bed; do
+    f=$(basename "$bedfile" .hg19.sorted.bed)
+    mkdir -p annot/${f}
+    for chr in {1..22}; do
+        python ../../ldsc/make_annot.py \
+            --bed-file "$bedfile" \
+            --bimfile ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC.${chr}.bim \
+            --annot-file annot/${f}/${f}.${chr}.annot.gz
+    done
+    echo "${f}: done"
+done
+```
+## Testing L2 on one chromosome
+
+```bash
+time python ../../ldsc/ldsc.py \
+    --l2 \
+    --bfile ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC.21 \
+    --ld-wind-cm 1 \
+    --annot annot/MSN/MSN.21.annot.gz \
+    --thin-annot \
+    --out annot/MSN/MSN.21
+```
+Beginning analysis at Tue Jul  7 19:58:21 2026
+Read list of 138712 SNPs from ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC.21.bim
+Read 1 annotations for 138712 SNPs from annot/MSN/MSN.21.annot.gz
+Read list of 489 individuals from ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC.21.fam
+Reading genotypes from ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC.21.bed
+After filtering, 138712 SNPs remain
+Estimating LD Score.
+Writing LD Scores for 138712 SNPs to annot/MSN/MSN.21.l2.ldscore.gz
+
+Summary of LD Scores in annot/MSN/MSN.21.l2.ldscore.gz
+        MAF      L2
+mean 0.1537  1.8908
+std  0.1511  2.7863
+min  0.0051 -0.2155
+25%  0.0204  0.2250
+50%  0.0941  0.8779
+75%  0.2679  2.3738
+max  0.5000 26.4876
+
+MAF/LD Score Correlation Matrix
+       MAF     L2
+MAF 1.0000 0.2792
+L2  0.2792 1.0000
+
+Annotation Correlation Matrix
+       ANNOT
+ANNOT 1.0000
+
+Annotation Matrix Column Sums
+ANNOT    3398
+
+Summary of Annotation Matrix Row Sums
+count   138712.0000
+mean         0.0245
+std          0.1546
+min          0.0000
+25%          0.0000
+50%          0.0000
+75%          0.0000
+max          1.0000
+Analysis finished at Tue Jul  7 19:58:54 2026
+Total time elapsed: 33.13s
+python ../../ldsc/ldsc.py --l2 --bfile  --ld-wind-cm 1 --annot  --thin-annot   299.31s user 1.64s system 880% cpu 34.178 total
+
+
+Also testing parallel based on the number of cores:
+
+```bash
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+time (seq 19 22 | parallel -j 4 --joblog logs/MSN_test2.log \
+    python ../../ldsc/ldsc.py \
+        --l2 \
+        --bfile ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC.{} \
+        --ld-wind-cm 1 \
+        --annot annot/MSN/MSN.{}.annot.gz \
+        --thin-annot \
+        --out annot/MSN/MSN.{})
+
+cat logs/MSN_test2.log
+```
+( seq 19 22 | parallel -j 4 --joblog logs/MSN_test2.log python  --l2 --bfile )  231.77s user 15.88s system 303% cpu 1:21.52 total
+Seq     Host    Starttime       JobRuntime      Send    Receive Exitval Signal  Command
+3       :       1783438868.649      47.924      0       1684    0       0       python ../../ldsc/ldsc.py --l2 --bfile ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC.21 --ld-wind-cm 1 --annot annot/MSN/MSN.21.annot.gz --thin-annot --out annot/MSN/MSN.21
+4       :       1783438868.664      49.957      0       1684    0       0       python ../../ldsc/ldsc.py --l2 --bfile ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC.22 --ld-wind-cm 1 --annot annot/MSN/MSN.22.annot.gz --thin-annot --out annot/MSN/MSN.22
+2       :       1783438868.634      70.315      0       1701    0       0       python ../../ldsc/ldsc.py --l2 --bfile ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC.20 --ld-wind-cm 1 --annot annot/MSN/MSN.20.annot.gz --thin-annot --out annot/MSN/MSN.20
+1       :       1783438868.618      80.983      0       1689    0       0       python ../../ldsc/ldsc.py --l2 --bfile ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC.19 --ld-wind-cm 1 --annot annot/MSN/MSN.19.annot.gz --thin-annot --out annot/MSN/MSN.19
+
+## Doing L2 for a set of cell types
+
+```bash
+nohup bash -c '
+mkdir -p logs
+
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+PRIORITY_CELLTYPES="MSN PVALB SST VIP LAMP5_1 LAMP5_2 SNCG ITL23 ITL5 SUB ASCT MGC"
+
+for f in $PRIORITY_CELLTYPES; do
+    mkdir -p annot/${f}
+
+    seq 1 22 | parallel -j 4 --joblog logs/${f}_l2.log \
+        python ../../ldsc/ldsc.py \
+            --l2 \
+            --bfile ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC.{} \
+            --ld-wind-cm 1 \
+            --annot annot/${f}/${f}.{}.annot.gz \
+            --thin-annot \
+            --out annot/${f}/${f}.{}
+
+    echo "${f}: L2 done at $(date)" >> logs/overall_progress.log
+done
+' > logs/full_l2_run.out 2>&1 &
+```
+[1] 15985
+
+
+
+
+
+
+
+
+
+checking all chromosomes of all cell types:
+```bash
+for f in MSN PVALB SST VIP LAMP5_1 LAMP5_2 ITL23 ITL5 ITL6_1 SUB ASCT MGC OPC SNCG; do
+    count=$(ls annot/${f}/${f}.*.l2.ldscore.gz 2>/dev/null | wc -l)
+    echo "${f}: ${count}/22 chromosomes"
+done
+```
+
+
+fixing bug
+```bash
+sed -i '223s/get_present_chrs(fh, num+1)/get_present_chrs(fh_list[0], num+1)/' /mnt/h/projects/ldsc/ldscore/parse.py
+```
+
+Doing --h2:
+```bash
+mkdir -p results
+
+for f in MSN PVALB SST VIP LAMP5_1 LAMP5_2 ITL23 ITL5 ITL6_1 SUB ASCT MGC OPC SNCG; do
+
+    # baseline v1.2 — for tau p-value / significance
+    python ../../ldsc/ldsc.py \
+        --h2 gwas/daner_OCD_wo23andMe.munged.sumstats.gz \
+        --ref-ld-chr ldsc_ref/baseline_v1.2/baseline.,annot/${f}/${f}. \
+        --w-ld-chr ldsc_ref/weights_hm3_no_MHC/weights.hm3_noMHC. \
+        --overlap-annot \
+        --frqfile-chr ldsc_ref/1000G_Phase3_frq/1000G.EUR.QC. \
+        --out results/${f}_baseline_v1.2 \
+        --print-coefficients
+
+    # baselineLD v2.2 — for %h2 enrichment magnitude
+    python ../../ldsc/ldsc.py \
+        --h2 gwas/daner_OCD_wo23andMe.munged.sumstats.gz \
+        --ref-ld-chr ldsc_ref/baselineLD_v2.2/baselineLD.,annot/${f}/${f}. \
+        --w-ld-chr ldsc_ref/weights_hm3_no_MHC/weights.hm3_noMHC. \
+        --overlap-annot \
+        --frqfile-chr ldsc_ref/1000G_Phase3_frq/1000G.EUR.QC. \
+        --out results/${f}_baselineLD_v2.2 \
+        --print-coefficients
+
+    echo "${f}: h2 regression done"
+done
+```
+
+## Summary table
+
+```bash
+echo -e "CellType\tModel\tProp_SNPs\tProp_h2\tEnrichment\tEnrichment_p\tCoef_z" > summary_table.tsv
+
+for f in *_baseline_v1.2.results; do
+    ct=$(basename "$f" _baseline_v1.2.results)
+    row=$(tail -1 "$f")
+    prop_snps=$(echo "$row" | awk -F'\t' '{print $2}')
+    prop_h2=$(echo "$row" | awk -F'\t' '{print $3}')
+    enrich=$(echo "$row" | awk -F'\t' '{print $5}')
+    enrich_p=$(echo "$row" | awk -F'\t' '{print $7}')
+    coef_z=$(echo "$row" | awk -F'\t' '{print $10}')
+    echo -e "${ct}\tbaseline_v1.2\t${prop_snps}\t${prop_h2}\t${enrich}\t${enrich_p}\t${coef_z}" >> summary_table.tsv
+done
+
+for f in *_baselineLD_v2.2.results; do
+    ct=$(basename "$f" _baselineLD_v2.2.results)
+    row=$(tail -1 "$f")
+    prop_snps=$(echo "$row" | awk -F'\t' '{print $2}')
+    prop_h2=$(echo "$row" | awk -F'\t' '{print $3}')
+    enrich=$(echo "$row" | awk -F'\t' '{print $5}')
+    enrich_p=$(echo "$row" | awk -F'\t' '{print $7}')
+    coef_z=$(echo "$row" | awk -F'\t' '{print $10}')
+    echo -e "${ct}\tbaselineLD_v2.2\t${prop_snps}\t${prop_h2}\t${enrich}\t${enrich_p}\t${coef_z}" >> summary_table.tsv
+done
+```
+
+
+Applying Bonferroni correction across your 13 cell types (α = 0.05/13 ≈ 0.0038) to the baselineLD v2.2 enrichment p-values:
+Significant: ITL23, ITL5, ITL6_1, LAMP5_1, LAMP5_2, MSN, OPC, PVALB, VIP, SST
+Not significant after correction: ASCT, MGC, SNCG, SUB
+
+# Setting up snakemake
+
+## Creating files
+
+config.yaml
+snakemake.file
+ReadMe.md
+
+
+snakemake -n #or snakemake -n -p --reason 
+snakemake -j 4 
+
+## Testing snakemake
+
+Adding a new cell type ITL34
+
+## Adding FDR and other significance tests
+
+Creating the summary table for all 44 cell types
+
+# Downloading other summary stats
+
+From Psychiatric Genomics Consortium: <https://pgc.unc.edu/for-researchers/download-results/>
+
+## Tourette gwas
+The article: Interrogating the Genetic Determinants of Tourette's Syndrome and Other Tic Disorders Through Genome-Wide Association Studies
+doi: 10.1176/appi.ajp.2018.18070857
+
+Dataset: https://figshare.com/articles/dataset/ts2019/14672232?file=28169937
+
+## Schiz (control the same from the original snATAC)
+The article: Biological Insights From 108 Schizophrenia-Associated Genetic Loci 
+doi: 10.1038/nature13595
+
+Dataset: <https://figshare.com/articles/dataset/scz2014/14672163>
+
+## Multi-trait pipeline
+Each gwas trait will now result in its own folder.
+
+Fix for typo of results folder (ocd instead of OCD):
+find results/OCD -name "*.results" -exec touch {} \;
+
+snakemake -n --rerun-triggers mtime
+
+
+## Pre_munged versions for gwas
+
+Anorexia Nervosa from sumstats: Watson 2019
+
+ADHD from sumstats: Demontis 2023
+
+## Verison 5 
+changed rg comparison to pairwise
+
+# Other cCRE?
+
+## Fetal and adult tissues
+From the article: "A single-cell atlas of chromatin accessibility in the human genome"
+doi: 10.1016/j.cell.2021.10.024
+
+catlas: <https://catlas.org/humanenhancer/data/>
+
+## Endometrial tissues
+From the article: "Dynamic chromatin remodeling in cycling human endometrium at single cell level"
