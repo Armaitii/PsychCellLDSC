@@ -1,0 +1,96 @@
+---
+title: "S-LDSC analysis of OCD-associated brain cCREs"
+subtitle: "Research notes and reproducibility protocol"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+execute:
+  eval: false
+---
+
+# Scope and source of truth
+
+This Quarto document reorganizes the original manual analysis notes into a concise protocol. Code blocks are examples and are not executed when rendering this document. The production workflow is [`../workflow/Snakefile`](../workflow/Snakefile), with shared settings in [`../workflow/config.yaml`](../workflow/config.yaml); use those files rather than copying old shell loops into a new analysis.
+
+The project tests cell-type cCRE annotations from CATlas against GWAS summary statistics with S-LDSC. It also runs genetic-correlation analyses with `ldsc.py --rg`. Data and reference files are not included in this repository. See [`../docs/data-sources.md`](../docs/data-sources.md) for the recorded source links and citation follow-ups.
+
+# Data and QC
+
+The primary OCD input recorded in the notes is the PGC meta-analysis excluding 23andMe, `daner_OCD_full_wo23andMe_190522.gz`. The workflow's `prep_gwas` rule reads the source columns by name and computes:
+
+- Effective sample size: `Neff = 2 * Neff_half` when the per-SNP `Neff_half` field is available.
+- Approximate MAF: `(FRQ_A + FRQ_U) / 2` when case and control frequency columns are present.
+
+The other configured formats are handled in `workflow/Snakefile`: `simple` inputs use study-level case/control counts, and `premunged` inputs bypass raw-data preparation and LDSC munging.
+
+## Historical OCD file checks
+
+The original notebook recorded these observations for the above OCD file. They are copied as **historical QC notes**, not verified in this checkout; rerun the checks against the exact file release you use. No checksum value was recorded, so compare with a checksum supplied by the data provider if available.
+
+| Check | Value recorded in the original notes |
+|---|---:|
+| Variant rows (excluding header) | 6,791,632 |
+| INFO minimum / median / maximum | 0.803 / 0.981 / 1.000 |
+| Variants with INFO ≥ 0.9 | 6,688,281 |
+| Genomic inflation factor (lambda GC) | 1.188 |
+| Variants retained after HapMap3, INFO, and effective-N filters in that run | 1,049,428 |
+
+Useful inspection commands (run only on a local, permitted copy of the file):
+
+```bash
+md5sum daner_OCD_full_wo23andMe_190522.gz
+zcat daner_OCD_full_wo23andMe_190522.gz | head -3
+zcat daner_OCD_full_wo23andMe_190522.gz | wc -l
+```
+
+The original notes also show how `Neff_half` relates to the case/control counts. The workflow now calculates effective N from the configured/source columns and performs the subsequent munge step, so avoid manually creating a second prepared file unless you intentionally alter the analysis.
+
+# Workflow stages
+
+The Snakemake DAG makes the annotation and LD-score work trait-independent, then reuses it for each h2 trait:
+
+1. Prepare and munge raw GWAS sumstats, or use premunged files.
+2. Lift the hg38 CATlas cCRE BEDs to hg19 with UCSC `liftOver`, then sort them.
+3. Create per-cell-type, per-chromosome annotation files with LDSC `make_annot.py`.
+4. Calculate chromosome-specific LD scores with `ldsc.py --l2`, restricted to HapMap3 SNPs.
+5. Run `ldsc.py --h2` against `baseline_v1.2` and `baselineLD_v2.2`, then write per-trait summary and corrected-significance tables.
+6. Run the configured pairwise and base-trait genetic correlations with `ldsc.py --rg`.
+
+Run from the `workflow/` directory after placing the inputs described in the config and confirming `ldsc_dir`:
+
+```bash
+snakemake --profile profiles/default --dry-run
+snakemake --profile profiles/default
+```
+
+The default config requests 43 unique cell types, five h2 traits, two baseline models, and 24 unique rg comparisons. This full run is compute- and data-intensive. Inspect the dry-run DAG first; use explicit output targets or edit a local config override to test a smaller subset.
+
+# Historical pipeline sanity checks
+
+The uploaded notebook recorded a single-chromosome LDSC `--l2` test for MSN on chromosome 21: 138,712 reference SNPs, 3,398 SNPs overlapping the annotation, and mean LD score 1.8908. This is an old, run-specific sanity check, not a guaranteed benchmark or a current project result. The original terminal transcripts, timings, process IDs, and full command output have been removed; Snakemake logs are generated locally under `workflow/logs/`.
+
+The old notes also include exploratory enrichment results from a 13-cell-type run. Those results are not carried forward as conclusions: the current workflow includes more cell types and its corrected tests are based on LDSC coefficient z-scores, with correction performed separately by baseline model. Re-run the current DAG before reporting statistical findings.
+
+# LDSC and environment notes
+
+The original environment notes specify the Python 3.9 `ldsc39` branch of [CBIIT/ldsc](https://github.com/CBIIT/ldsc/tree/ldsc39), its `requirements.txt`, `pybedtools`, `bedtools`, and UCSC `liftOver`. The old notes do not record the exact LDSC commit or a complete, working environment lock. The recorded installation approach was:
+
+```bash
+git clone --branch ldsc39 https://github.com/CBIIT/ldsc.git /path/to/ldsc
+conda create --name ldsc39 python=3.9
+conda activate ldsc39
+python -m pip install -r /path/to/ldsc/requirements.txt
+```
+
+Install Snakemake, `pybedtools`, `bedtools`, and UCSC `liftOver` in a compatible environment as well. The LDSC requirements are old and the notes reported a Conda channel issue; verify dependency resolution on your platform rather than assuming this historical recipe is a lockfile. Record the checkout revision with `git -C /path/to/ldsc rev-parse HEAD` and preserve any compatibility patch applied to `ldscore/parse.py`; details are in [`../docs/data-sources.md`](../docs/data-sources.md).
+
+The LDSC branch and dependencies are separate software, not vendored here. Check their licenses and compatibility before installing. The repository currently does not create per-rule Conda environments, so `snakemake --use-conda` alone is not a complete environment setup.
+
+# Data use and reporting
+
+- Keep GWAS, cCRE, genotype, LD-score, and chain files in approved local or institutional storage under `data/`; do not commit them unless redistribution is explicitly allowed.
+- Record each input release, checksum, citation, and access/redistribution conditions in [`../docs/data-sources.md`](../docs/data-sources.md).
+- Store generated tables and logs under `workflow/results/` and `workflow/logs/`; they are intentionally excluded from Git. Share results through an appropriate repository/archive only after checking the underlying data terms.
+- Sources mentioned for possible fetal/adult or endometrial cCRE analyses are future directions only; those datasets are not part of the current config.

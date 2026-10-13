@@ -216,3 +216,32 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# PsychCellLDSC: user-provided data and generated workflow outputs stay out of Git.
+# Data paths are rooted at data/; execute Snakemake from workflow/.
+data/cCRE/hg38/*
+!data/cCRE/hg38/README.md
+data/gwas/*
+!data/gwas/README.md
+data/ldsc_ref/*
+!data/ldsc_ref/README.md
+
+# Generated files (the workflow writes these under workflow/).
+workflow/cCRE/hg19/*
+!workflow/cCRE/hg19/README.md
+workflow/gwas/
+workflow/ldsc_ref/
+workflow/annot/
+workflow/results/
+workflow/logs/
+workflow/.snakemake/
+
+# Quarto-generated render outputs and caches.
+.quarto/
+**/_freeze/
+notebooks/*.html
+notebooks/*_cache/
+notebooks/*_files/
+
+# User-specific config overrides (keep the tracked config.yaml as the shared template).
+workflow/config.local.yaml

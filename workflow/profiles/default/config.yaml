@@ -1,0 +1,7 @@
+# Conservative local profile. Run from workflow/ with:
+#   snakemake --profile profiles/default
+# Reduce/increase `jobs` for the memory and CPU limits of the host.
+jobs: 4
+keep-going: true
+rerun-incomplete: true
+printshellcmds: true
