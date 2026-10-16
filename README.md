@@ -19,7 +19,7 @@ No GWAS summary statistics, cCRE BEDs, reference genotypes/LD scores, or analysi
 4. Run partitioned heritability against `baseline_v1.2` and `baselineLD_v2.2`; summarize coefficient tests with Benjamini–Hochberg FDR and Bonferroni correction.
 5. Run pairwise rg analyses among `rg_traits` and the configured base-trait comparisons against already-munged files in `rg_comparison_traits`.
 
-The current config contains five h2 traits and 43 unique cell types (the duplicate `PVALB` is deduplicated), producing 430 h2 regressions in a full run. It also configures 24 unique rg comparisons after deduplication. Inspect the DAG and consider targeting a subset before launching the full analysis.
+The current config contains five h2 traits and 43 unique cell types, producing 430 h2 regressions in a full run. It also configures 24 unique rg comparisons after deduplication. Inspect the DAG and consider targeting a subset before launching the full analysis.
 
 ## Repository layout
 
@@ -62,7 +62,7 @@ The notebook records a CBIIT `ldsc39` checkout, Python 3.9, the checkout's `requ
 
 ## Configure and run
 
-1. Install Snakemake and the Python/system dependencies compatible with your LDSC checkout. Make sure `liftOver` is on `PATH`.
+1. Install Snakemake and the Python/system dependencies compatible with your LDSC checkout. 
 2. Place local inputs in `data/` and confirm paths in `workflow/config.yaml`, especially `ldsc_dir`.
 3. From the repository root, inspect the DAG:
 
@@ -87,6 +87,3 @@ Outputs are written under `workflow/results/`; logs and intermediates are under 
 
 The notebook is a Quarto document with static code examples and notes, not an executable copy of the whole Snakemake DAG. If Quarto is installed, render it with `quarto render notebooks/S_LDSC_notebook.qmd`; generated HTML and render caches are ignored.
 
-## License
-
-Code in this repository is licensed under the MIT License. This does not grant redistribution rights for GWAS, cCRE, LDSC reference, or third-party software; follow their separate terms and licenses.
