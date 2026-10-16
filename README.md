@@ -1,5 +1,7 @@
 # PsychCellLDSC
 
+(still under active development)
+
 A Snakemake workflow for cell-type partitioned heritability and genetic-correlation analyses with stratified LD Score Regression (S-LDSC). It uses CATlas brain cell-type cis-regulatory elements (cCREs), lifts annotations from hg38 to hg19, computes LD scores, and analyzes GWAS traits against baseline and baseline-LD references.
 
 ## Project contents
