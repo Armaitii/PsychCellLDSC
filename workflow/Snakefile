@@ -15,13 +15,18 @@ Stages:
   4. ldsc.py --h2 -> partitioned heritability regression, per trait,
      against baseline_v1.2 AND baselineLD_v2.2
   5. Aggregate + FDR/Bonferroni correction, per trait
+  6. Run configured pairwise and base-vs-comparator genetic correlations
 
-Run e.g.:
-  snakemake -j 4 --use-conda   (adjust -j to core budget; see notes in config.yaml)
-  snakemake -n                 (dry run, sanity check DAG first)
+Run from the workflow directory, e.g.:
+  snakemake --profile profiles/default --dry-run
+  snakemake --profile profiles/default
+
+Note: this workflow currently relies on tools installed in the active
+environment; it does not yet declare per-rule Conda environments.
 """
 
 import os
+import re
 from itertools import combinations
 
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -35,10 +40,15 @@ CELLTYPES = list(dict.fromkeys(config["celltypes"]))
 CHRS = list(range(1, 23))
 BASELINES = ["baseline_v1.2", "baselineLD_v2.2"]
 TRAITS = list(config["traits"].keys())
+RG_BASE_TRAIT = config.get("rg_base_trait", "OCD")
+RG_COMPARISON_TRAITS = config.get("rg_comparison_traits", {})
+RG_TRAITS = list(config.get("rg_traits", TRAITS))
+
+if not isinstance(RG_COMPARISON_TRAITS, dict):
+    raise TypeError("rg_comparison_traits must be a mapping of names to sumstats paths")
 
 # Traits supplied ALREADY MUNGED (format: premunged). These have no raw_file
-# and must never be routed through prep_gwas / munge_sumstats -- doing so
-# raises KeyError: 'raw_file'.
+# and must never be routed through prep_gwas / munge_sumstats.
 PREMUNGED = {
     t for t, cfg in config["traits"].items()
     if cfg.get("format") == "premunged"
@@ -46,11 +56,7 @@ PREMUNGED = {
 
 
 def sumstats_for(trait):
-    """Single source of truth for a trait's munged sumstats path.
-
-    premunged -> the external file, used as-is (no prep, no munge)
-    otherwise -> the file our own munge_sumstats rule produces
-    """
+    """Return a primary trait's munged sumstats path."""
     cfg = config["traits"][trait]
     if trait in PREMUNGED:
         if "premunged_file" not in cfg:
@@ -61,36 +67,38 @@ def sumstats_for(trait):
     return f"gwas/{trait}/{trait}.munged.sumstats.gz"
 
 
+def rg_source_sumstats_for(trait):
+    """Return the configured source for an rg trait or external comparator."""
+    if trait in RG_COMPARISON_TRAITS:
+        return RG_COMPARISON_TRAITS[trait]
+    if trait in config["traits"]:
+        return sumstats_for(trait)
+    raise KeyError(
+        f"No sumstats configured for rg trait/comparator {trait!r}; add it to "
+        "traits or rg_comparison_traits."
+    )
+
+
 # Optional list of rsIDs to drop before --rg (see rule drop_incompatible_snps).
 EXCLUDE_SNPS = config.get("exclude_snps", "gwas/exclude_snps.txt")
 
 
 def rg_sumstats_for(trait):
-    """Sumstats used for --rg: the allele-filtered copy.
+    """Return the filtered sumstats path used by an --rg comparison.
 
-    ldsc's _align_alleles crashes with
-        KeyError: Incompatible alleles in .sumstats files: TGTC
-    if ANY merged SNP has alleles that cannot be reconciled by strand flip or
-    reference swap (e.g. TS says T/G where Anorexia says T/C). _filter_alleles
-    already drops such SNPs, but a stale `alleles` Series means the alignment
-    step still sees them. Rather than patch ldsc, we remove the handful of
-    offending rsIDs up front -- for TS x Anorexia that is exactly 1 SNP out of
-    1,094,320 (~0.0001%), which is scientifically inconsequential.
+    LDSC's allele-alignment step can fail on incompatible alleles that survive
+    its own filtering. The optional exclude list removes known offending rsIDs
+    uniformly from every rg input; if that list is absent, inputs are copied
+    unchanged.
     """
     return f"gwas/rg_filtered/{trait}.sumstats.gz"
 
 
-# Primary traits to compare pairwise with LDSC --rg.
-# Defaults to every trait already defined in the pipeline.
-# Set rg_traits in config.yaml to restrict this family.
-
-# Primary analyses
-RG_BASE_TRAIT = config["rg_base_trait"]
-RG_COMPARISON_TRAITS = config["rg_comparison_traits"]
-
-# Exploratory analyses
-RG_TRAITS = config["rg_traits"]
-RG_PAIRS = list(combinations(RG_TRAITS, 2))
+# Pairwise primary-trait analyses and OCD-vs-external-comparator analyses.
+if RG_BASE_TRAIT not in TRAITS:
+    raise ValueError(
+        f"rg_base_trait {RG_BASE_TRAIT!r} is not present in the traits section"
+    )
 
 missing_rg_traits = sorted(set(RG_TRAITS) - set(TRAITS))
 if missing_rg_traits:
@@ -98,19 +106,19 @@ if missing_rg_traits:
         f"rg_traits contains names not present in traits: {missing_rg_traits}"
     )
 
-# Canonical unordered pairs: e.g. OCD_vs_SCZ but never SCZ_vs_OCD.
+RG_LABELS = list(dict.fromkeys(TRAITS + list(RG_COMPARISON_TRAITS)))
 RG_PRIMARY = [
-    (RG_BASE_TRAIT, t)
-    for t in RG_COMPARISON_TRAITS
-    if t != RG_BASE_TRAIT
+    (RG_BASE_TRAIT, trait)
+    for trait in RG_COMPARISON_TRAITS
+    if trait != RG_BASE_TRAIT
 ]
-
-RG_PAIRWISE = RG_PAIRS
+RG_PAIRWISE = list(combinations(RG_TRAITS, 2))
 RG_ALL = list(dict.fromkeys(RG_PRIMARY + RG_PAIRWISE))
 RG_LOGS = [
     f"results/rg/{trait1}_vs_{trait2}.log"
-    for trait1, trait2 in RG_PAIRS
+    for trait1, trait2 in RG_ALL
 ]
+RG_LABEL_PATTERN = "|".join(re.escape(trait) for trait in RG_LABELS)
 
 BASELINE_PREFIX = {
     "baseline_v1.2": "baseline",
@@ -119,9 +127,10 @@ BASELINE_PREFIX = {
 
 wildcard_constraints:
     baseline = "baseline_v1\\.2|baselineLD_v2\\.2",
-    trait = "|".join(TRAITS),
-    trait1 = "|".join(TRAITS),
-    trait2 = "|".join(TRAITS)
+    trait = "|".join(re.escape(trait) for trait in TRAITS),
+    trait1 = RG_LABEL_PATTERN,
+    trait2 = RG_LABEL_PATTERN,
+    rg_trait = RG_LABEL_PATTERN
 
 rule all:
     input:
@@ -132,7 +141,7 @@ rule all:
         expand("results/{trait}/summary_table.tsv", trait=TRAITS),
         expand("results/{trait}/summary_table_corrected.tsv", trait=TRAITS),
         RG_LOGS,
-        "results/rg/rg_summary.tsv" if RG_PAIRS else []
+        "results/rg/rg_summary.tsv" if RG_ALL else []
 
 # ---------------------------------------------------------------------------
 # 0a. Prep raw GWAS file into a uniform intermediate: guarantees a "Neff"
@@ -399,9 +408,8 @@ rule l2_score:
 
 # ---------------------------------------------------------------------------
 # 4. ldsc.py --h2 — partitioned heritability regression, per trait.
-#    Requires the parse.py patch at line 223
-#    (get_present_chrs(fh_list[0], ...) not (fh, ...)) for --overlap-annot
-#    to work with multiple comma-separated --ref-ld-chr prefixes.
+#    Requires the CBIIT ldsc39 parse.py compatibility fix documented in
+#    ../docs/data-sources.md for --overlap-annot with multiple reference prefixes.
 # ---------------------------------------------------------------------------
 rule h2_regression:
     input:
@@ -539,42 +547,23 @@ rule significance_testing:
                 writer.writerow(r)
 
 # ---------------------------------------------------------------------------
-# 7. Genetic correlation (ldsc.py --rg) across all primary traits
-#
-#    For N primary traits this produces N*(N-1)/2 pairwise comparisons.
-#
-#    By default:
-#      RG_TRAITS = TRAITS
-#
-#    To restrict the analysis, add to config.yaml:
-#      rg_traits:
-#        - OCD
-#        - SCZ
-#        - TS
-#        - AN
-#        - ADHD
-#
-#    This uses each trait's own munged summary statistics and the same
-#    non-partitioned EUR LD-score reference for standard LDSC --rg.
+# 7. Genetic correlation (ldsc.py --rg): all configured primary-trait pairs,
+#    plus the configured base-trait comparisons to external munged sumstats.
+#    All pairs use the same non-partitioned EUR LD-score reference.
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# 6b. Drop allele-incompatible SNPs before --rg.
-#
-#     Build gwas/exclude_snps.txt with:   python3 find_bad_snp.py
-#     (an empty or absent file is fine -- then this is a straight copy).
-#
-#     Applies to EVERY trait so all pairs use an identical SNP set, which is
-#     also better practice than filtering only the pair that happened to fail.
+# 7a. Optionally remove incompatible rsIDs before --rg. If the configured
+#     exclude list is absent or empty, each input is copied unchanged.
+#     Filtering every rg input keeps the SNP exclusion policy consistent.
 # ---------------------------------------------------------------------------
 rule drop_incompatible_snps:
     input:
-        sumstats = lambda wc: sumstats_for(wc.trait)
+        sumstats = lambda wc: rg_source_sumstats_for(wc.rg_trait)
     output:
-        "gwas/rg_filtered/{trait}.sumstats.gz"
+        "gwas/rg_filtered/{rg_trait}.sumstats.gz"
     params:
         exclude = EXCLUDE_SNPS
     log:
-        "logs/rg_filter/{trait}.log"
+        "logs/rg_filter/{rg_trait}.log"
     run:
         import gzip, os, shutil
 
@@ -639,7 +628,7 @@ rule rg_summary:
 
         rows = []
 
-        for trait1, trait2 in RG_PAIRS:
+        for trait1, trait2 in RG_ALL:
             fpath = f"results/rg/{trait1}_vs_{trait2}.log"
 
             with open(fpath) as f:

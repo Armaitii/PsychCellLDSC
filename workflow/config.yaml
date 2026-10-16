@@ -1,20 +1,21 @@
-# Paths — adjust to match your OCD/s_ldsc layout.
-# All relative paths are relative to wherever you run `snakemake` from
-# (recommended: run from OCD/s_ldsc/, with this Snakefile + config.yaml copied there).
+# Shared example configuration for this checkout.
+# Run Snakemake with the current working directory set to workflow/ so all
+# relative input/output paths below resolve consistently. Adjust these paths
+# for your own storage layout before running; none of the data is in Git.
 
-ldsc_dir: "../../ldsc"                                  # cloned ldsc repo (with the parse.py patch applied)
+ldsc_dir: "../../ldsc"                                  # external patched LDSC checkout (ldsc.py, munge_sumstats.py, make_annot.py)
 
 # --- inputs you already have (trait-independent) ---
-ccre_hg38_dir: "cCRE/hg38"                               # raw CATlas cCRE .bed.txt files, one per celltype
-chain_file: "ldsc_ref/hg38ToHg19.over.chain.gz"
+ccre_hg38_dir: "../data/cCRE/hg38"                               # raw CATlas cCRE .bed.txt files, one per celltype
+chain_file: "../data/ldsc_ref/hg38ToHg19.over.chain.gz"
 
-plink_prefix: "ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC"   # -> {prefix}.{chr}.bed/bim/fam
-hm3_snplist: "ldsc_ref/w_hm3.snplist"                    # original 3-column file (SNP A1 A2), from zenodo.org/records/7773502
+plink_prefix: "../data/ldsc_ref/1000G_EUR_Phase3_plink/1000G.EUR.QC"   # -> {prefix}.{chr}.bed/bim/fam
+hm3_snplist: "../data/ldsc_ref/w_hm3.snplist"                    # original 3-column file (SNP A1 A2), from zenodo.org/records/7773502
 hm3_snplist_ids_only: "ldsc_ref/w_hm3.snplist.ids_only"  # auto-generated single-column version (see hm3_ids_only rule)
 
-baseline_dir: "ldsc_ref"                                 # contains baseline_v1.2/ and baselineLD_v2.2/ subfolders
-weights_ld_chr: "ldsc_ref/weights_hm3_no_MHC/weights.hm3_noMHC."
-frqfile_chr: "ldsc_ref/1000G_Phase3_frq/1000G.EUR.QC."
+baseline_dir: "../data/ldsc_ref"                                 # contains baseline_v1.2/ and baselineLD_v2.2/ subfolders
+weights_ld_chr: "../data/ldsc_ref/weights_hm3_no_MHC/weights.hm3_noMHC."
+frqfile_chr: "../data/ldsc_ref/1000G_Phase3_frq/1000G.EUR.QC."
 
 # --- GWAS traits ---
 # Each trait needs a raw_file + format. Two formats supported:
@@ -29,13 +30,13 @@ frqfile_chr: "ldsc_ref/1000G_Phase3_frq/1000G.EUR.QC."
 traits:
   OCD:
     format: daner
-    raw_file: "gwas/OCD/daner_OCD_full_wo23andMe_190522.gz"
+    raw_file: "../data/gwas/OCD/daner_OCD_full_wo23andMe_190522.gz"
   SCZ:
     format: daner
-    raw_file: "gwas/SCZ/daner_PGC_SCZ52_0513a.hq2.gz"
+    raw_file: "../data/gwas/SCZ/daner_PGC_SCZ52_0513a.hq2.gz"
   TS:
     format: simple
-    raw_file: "gwas/TS/TS_Oct2018.gz"
+    raw_file: "../data/gwas/TS/TS_Oct2018.gz"
     n_cas: 4819
     n_con: 9488
   # --- premunged: already-munged external sumstats, no prep needed ---
@@ -43,11 +44,11 @@ traits:
   # premunged_file directly. raw_file not needed for these.
   ADHD:
     format: premunged
-    premunged_file: "gwas/external/PASS.Attention_Deficit_Hyperactivity_Disorder_ADHD.Demontis2023.sumstats.gz"
+    premunged_file: "../data/gwas/external/PASS.Attention_Deficit_Hyperactivity_Disorder_ADHD.Demontis2023.sumstats.gz"
 
   Anorexia:
     format: premunged
-    premunged_file: "gwas/external/PASS.Anorexia_Nervosa.Watson2019.sumstats.gz"
+    premunged_file: "../data/gwas/external/PASS.Anorexia_Nervosa.Watson2019.sumstats.gz"
 
 # --- cell types to run ---
 celltypes:
@@ -104,7 +105,8 @@ celltypes:
 # Price-lab bundle or traits_indep107 collection) used as-is, no prep
 # needed. Adjust paths to wherever you actually saved these downloads.
 rg_base_trait: "OCD"
-rg_ld_chr: "ldsc_ref/eur_w_ld_chr/"   # dedicated non-partitioned LD scores
+exclude_snps: "../data/gwas/exclude_snps.txt"  # optional; absent file means no rsIDs are removed
+rg_ld_chr: "../data/ldsc_ref/eur_w_ld_chr/"   # dedicated non-partitioned LD scores
 
 # If you don't specify rg_traits, the new Snakefile uses every trait in TRAITS.
 rg_traits:
@@ -115,20 +117,20 @@ rg_traits:
   - ADHD
 
 rg_comparison_traits:
-  ADHD: "gwas/external/PASS.Attention_Deficit_Hyperactivity_Disorder_ADHD.Demontis2023.sumstats.gz"
-  Depression: "gwas/external/PASS.Depression.Howard2019.sumstats.gz"
-  BipolarDisorder: "gwas/external/PASS.Bipolar_Disorder_ALL.Mullins2021.sumstats.gz"
-  Schizophrenia2022: "gwas/external/PASS.Schizophrenia.Trubetskoy2022.sumstats.gz"
-  TouretteSyndrome: "gwas/external/PASS.Tourette_Syndrome.Yu2019.sumstats.gz"
-  Insomnia: "gwas/external/PASS.Insomnia.Watanabe2022.sumstats.gz"
-  Anorexia: "gwas/external/PASS.Anorexia_Nervosa.Watson2019.sumstats.gz"
-  BMI: "gwas/external/PASS.BMI.Yengo2018.sumstats.gz"
-  Height: "gwas/external/PASS.Height.Yengo2022.sumstats.gz"
-  Alcohol: "gwas/external/PASS.Alcohol_use.SanchezRoige2018.sumstats.gz"
-  Cigarettes: "gwas/external/PASS.Cigarettes_Per_Day.Liu2019.sumstats.gz"
-  Endometriosis: "gwas/external/PASS.Endometriosis.Rahmioglu2023.sumstats.gz"
-  Lupus: "gwas/external/PASS.Lupus.Bentham2015.sumstats.gz"
-  Physical_Activity: "gwas/external/PASS.Physical_Activity.Wang2022.sumstats.gz"
-  Reaction_Time: "gwas/external/PASS.Reaction_Time.Davies2018.sumstats.gz"
-  Sleep_Duration: "gwas/external/PASS.Sleep_Duration.Dashti2019.sumstats.gz"
+  ADHD: "../data/gwas/external/PASS.Attention_Deficit_Hyperactivity_Disorder_ADHD.Demontis2023.sumstats.gz"
+  Depression: "../data/gwas/external/PASS.Depression.Howard2019.sumstats.gz"
+  BipolarDisorder: "../data/gwas/external/PASS.Bipolar_Disorder_ALL.Mullins2021.sumstats.gz"
+  Schizophrenia2022: "../data/gwas/external/PASS.Schizophrenia.Trubetskoy2022.sumstats.gz"
+  TouretteSyndrome: "../data/gwas/external/PASS.Tourette_Syndrome.Yu2019.sumstats.gz"
+  Insomnia: "../data/gwas/external/PASS.Insomnia.Watanabe2022.sumstats.gz"
+  Anorexia: "../data/gwas/external/PASS.Anorexia_Nervosa.Watson2019.sumstats.gz"
+  BMI: "../data/gwas/external/PASS.BMI.Yengo2018.sumstats.gz"
+  Height: "../data/gwas/external/PASS.Height.Yengo2022.sumstats.gz"
+  Alcohol: "../data/gwas/external/PASS.Alcohol_use.SanchezRoige2018.sumstats.gz"
+  Cigarettes: "../data/gwas/external/PASS.Cigarettes_Per_Day.Liu2019.sumstats.gz"
+  Endometriosis: "../data/gwas/external/PASS.Endometriosis.Rahmioglu2023.sumstats.gz"
+  Lupus: "../data/gwas/external/PASS.Lupus.Bentham2015.sumstats.gz"
+  Physical_Activity: "../data/gwas/external/PASS.Physical_Activity.Wang2022.sumstats.gz"
+  Reaction_Time: "../data/gwas/external/PASS.Reaction_Time.Davies2018.sumstats.gz"
+  Sleep_Duration: "../data/gwas/external/PASS.Sleep_Duration.Dashti2019.sumstats.gz"
 
