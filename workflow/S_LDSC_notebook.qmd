@@ -77,64 +77,6 @@ eur_w_ld_chr was downloaded (needed for the genetic correlation between traits) 
 ## md5checksum
 Comparing the string to verify the integrity of data by ensuring that the data has not been altered or corrupted.
 
-```python
-md5sum daner_OCD_full_wo23andMe_190522.gz
-```
-
-zcat daner_OCD_full_wo23andMe_190522.gz | head -3
-CHR     SNP     BP      A1      A2      FRQ_A_23493     FRQ_U_1114613   INFO    OR      SE      P       ngt     Direction       HetISqt HetDf   HetPVa  Nca     Nco     Neff_half
-8       rs117278216     100516008       T       C       0.983   0.984   0.926   0.99491 0.0458  0.9116  0       -+-+?-?++?---+--?+????+????     0.0     14      0.6124  20570   1036589 34049.58
-8       rs62513865      101592213       C       T       0.926   0.918   0.967   1.01613 0.0203  0.4319  0       --++-+---++++-+-?-??--+++--     40.6    23      0.0213  23170   1114290 37925.99
- (anaconda3)  armaiti  /mnt/h/projects/ocd/s-ldsc/28707155  zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1{print $(NF-2), $(NF-1), $NF}' | head
-# columns: Nca Nco Neff_half — confirm Neff_half ≈ 4*Nca*Nco/(2*(Nca+Nco))
-20570 1036589 34049.58
-23170 1114290 37925.99
-23438 1114558 38193.99
-17027 652817 25814.81
-17350 653140 26137.81
-23362 1113255 38010.04
-16975 651171 25714.00
-22860 1107725 37341.47
-23493 1114613 38248.99
-22916 1112414 37478.50
- (anaconda3)  armaiti  /mnt/h/projects/ocd/s-ldsc/28707155  zcat daner_OCD_full_wo23andMe_190522.gz | wc -l
-6791633
- (anaconda3)  armaiti  /mnt/h/projects/ocd/s-ldsc/28707155  zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1{print $8}' | sort -n | awk '
-  {a[NR]=$1} END{print "min="a[1], "median="a[int(NR/2)], "max="a[NR]}'
-# INFO column distribution
-min=0.803 median=0.981 max=1
- (anaconda3)  armaiti  /mnt/h/projects/ocd/s-ldsc/28707155  zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1 && $8>=0.9' | wc -l
-# how many SNPs pass INFO >= 0.9 (munge_sumstats.py will filter this automatically if you pass --info-min 0.9)
-6688281
- (anaconda3)  armaiti  /mnt/h/projects/ocd/s-ldsc/28707155  zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1{print $11}' > /tmp/pvals.txt
-python3 -c "
-import numpy as np
-from scipy.stats import chi2
-p = np.loadtxt('/tmp/pvals.txt')
-p = p[(p>0)&(p<=1)]
-chisq = chi2.isf(p, 1)
-print('N SNPs:', len(p))
-print('lambda_GC:', np.median(chisq)/chi2.ppf(0.5,1))
-"
-N SNPs: 6791632
-lambda_GC: 1.1882138956814554
-
-## No INFO score SNPs
-How many SNPs have INFO == exactly 1?
-zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1 && $8==1' | wc -l
-51718
-How many SNPs with INFO<1 pass the >=0.9 threshold?
-zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1 && $8<1 && $8>=0.9' | wc -l
-
-6636563
-Of SNPs with INFO==1, how many have ngt>0 (genotyped in at least one study)?
-zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1 && $8==1 && $12>0' | wc -l
-
-23842
-Of SNPs with INFO==1, how many have ngt==0 (imputed in all studies, but INFO still set to 1)?
-zcat daner_OCD_full_wo23andMe_190522.gz | awk 'NR>1 && $8==1 && $12==0' | wc -l
-27876
-
 ## Prepare input file
 Create a clean Neff column and a single MAF column. Neff = 2 × Neff_half recovers the true per-SNP effective sample size. MAF = (FRQ_A + FRQ_U) / 2 averages case and control frequencies as a proxy for population MAF.
 
@@ -426,14 +368,6 @@ for f in $PRIORITY_CELLTYPES; do
 done
 ' > logs/full_l2_run.out 2>&1 &
 ```
-[1] 15985
-
-
-
-
-
-
-
 
 
 checking all chromosomes of all cell types:
@@ -509,7 +443,7 @@ done
 ```
 
 
-Applying Bonferroni correction across your 13 cell types (α = 0.05/13 ≈ 0.0038) to the baselineLD v2.2 enrichment p-values:
+Applying Bonferroni correction across the 13 cell types (α = 0.05/13 ≈ 0.0038) to the baselineLD v2.2 enrichment p-values:
 Significant: ITL23, ITL5, ITL6_1, LAMP5_1, LAMP5_2, MSN, OPC, PVALB, VIP, SST
 Not significant after correction: ASCT, MGC, SNCG, SUB
 
