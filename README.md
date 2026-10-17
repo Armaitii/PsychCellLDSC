@@ -1,18 +1,146 @@
 # PsychCellLDSC
 
-(still under active development)
+(still under development)
 
-A Snakemake workflow for cell-type partitioned heritability and genetic-correlation analyses with stratified LD Score Regression (S-LDSC). It uses CATlas brain cell-type cis-regulatory elements (cCREs), lifts annotations from hg38 to hg19, computes LD scores, and analyzes GWAS traits against baseline and baseline-LD references.
+A Snakemake workflow for cell-type partitioned heritability and genetic-correlation analyses with stratified LD Score Regression (S-LDSC). It uses cell-type cis-regulatory elements (cCREs), lifts annotations from hg38 to hg19 if needed, computes LD scores, and analyzes GWAS traits against baseline and baseline-LD references.
 
-## Project contents
+## 1. Inputs you provide
 
-- **Workflow:** `workflow/Snakefile` and `workflow/config.yaml` are the executable pipeline and its shared configuration.
-- **Analysis notebook:** [`notebooks/S_LDSC_notebook.qmd`](notebooks/S_LDSC_notebook.qmd) is the cleaned Quarto research notebook/protocol. It records the analysis rationale and manual checks; Snakemake is the source of truth for production runs.
-- **Data provenance:** [`docs/data-sources.md`](docs/data-sources.md) collects citations, download sources, and dependency notes from the notebook and config.
-- **Inputs and results:** large or access-controlled datasets are kept locally under `data/`, not committed. Generated artifacts are written under `workflow/` and ignored by Git.
+Place the input files (cCRE and GWAS data) in the local `data/` directories and set their locations and study settings in [`workflow/config.yaml`](workflow/config.yaml). Run Snakemake from `workflow/`; the checked-in config uses paths such as `../data/gwas/...` to refer to the project-level input folders. The data files themselves are not stored in this GitHub repository.
 
-No GWAS summary statistics, cCRE BEDs, reference genotypes/LD scores, or analysis results are included. Follow the access and redistribution terms for every source.
+### GWAS summary statistics
 
+The current configuration uses these input types:
+
+- **Raw `daner` files:** For example OCD and schizophrenia (SCZ), under `data/gwas/OCD/` and `data/gwas/SCZ/`. The workflow derives effective sample size and MAF from the source columns, then munges the files.
+- **Raw `simple` file:** For example Tourette syndrome (TS), under `data/gwas/TS/`. Its case and control sample counts are supplied in the config.
+- **Already-munged files:** Available GWAS sumstats, ADHD and Anorexia for example. Put these under `data/gwas/external/` as configured; they bypass raw-file preparation and munging.
+
+Check the `traits` and `rg_comparison_traits` sections for the exact filenames. Do not rename a file without updating the config. Verify the data-access and redistribution terms for every study before downloading or sharing it.
+
+### Cell-type cCREs
+
+Provide one cis regulatory element BED file for every configured cell type, pay attention to hg19/hg38 folder. This repository has used CATlas human brain snATAC-derived cCRE:
+
+```text
+data/cCRE/hg38/<CELLTYPE>.bed.txt
+```
+
+For example, the configured `MSN` input is `data/cCRE/hg38/MSN.bed.txt`. The cell-type list is in `workflow/config.yaml`.
+
+### Reference data and software
+
+The workflow also needs:
+
+- The UCSC hg38-to-hg19 chain file (if the cCRE were hg38)
+- 1000 Genomes EUR Phase 3 PLINK files for chromosomes 1–22.
+- The HapMap3 SNP list, baseline v1.2 and baseline-LD v2.2 references, LD-score weights, allele-frequency files, and the EUR LD scores used for genetic correlation.
+- A separate CBIIT LDSC checkout with `ldsc.py`, `munge_sumstats.py`, and `make_annot.py`, including the `parse.py` compatibility fix described in [`docs/data-sources.md`](docs/data-sources.md).
+
+The expected reference-data layout is described in [`data/ldsc_ref/README.md`](data/ldsc_ref/README.md). The notebook records the sources and software setup used during the original analysis; it does not record a complete environment lock or the exact LDSC commit.
+
+## 2. Workflow steps at a glance
+
+| Step | What Snakemake does | Main outputs |
+|---|---|---|
+| 1. GWAS preparation and checkings | Prepares and munges raw GWAS files; passes already-munged files through unchanged. | `workflow/gwas/` |
+| 2. LiftOver | Converts each cCRE BED from hg38 to hg19 and sorts the mapped intervals. | `workflow/cCRE/hg19/` |
+| 3. Annotation | Builds chromosome-specific annotations for each cell type. | `workflow/annot/` |
+| 4. LD scores | Calculates chromosome-specific, HapMap3-restricted LD scores for each cell type. These are shared across GWAS traits. | `workflow/annot/` |
+| 5. Heritability | Runs partitioned h2 for every configured trait and cell type against baseline v1.2 and baseline-LD v2.2. | `workflow/results/<trait>/` |
+| 6. Summaries | Aggregates cell-type results and applies FDR and Bonferroni correction. | `summary_table.tsv` and `summary_table_corrected.tsv` under each trait's results folder |
+| 7. Genetic correlation | Runs configured pairwise trait comparisons and base-trait comparisons against external, already-munged sumstats. | `workflow/results/rg/` |
+
+## 3. Outputs
+
+The final outputs are written under `workflow/results/`:
+
+- Per-trait, per-cell-type LDSC `.results` files for both baseline models.
+- Per-trait `summary_table.tsv` and `summary_table_corrected.tsv` files.
+- Per-pair rg logs and `rg_summary.tsv` under `workflow/results/rg/`.
+
+Intermediate GWAS files, lifted cCREs, annotations, LD scores, and logs are written under `workflow/gwas/`, `workflow/cCRE/hg19/`, `workflow/annot/`, and `workflow/logs/`. These generated files are ignored by Git.
+
+With the current config, a full run requests **430 h2 regressions** (five traits × 43 unique cell types × two baseline models) and **24 unique rg comparisons**. The duplicate `PVALB` entry in the config is deduplicated by the Snakefile.
+
+## 4. What you need to do
+
+Once the inputs are in place and the config paths are correct, you do **not** need to run each analysis command or pipeline stage manually. Run Snakemake; it builds the dependency graph and schedules the required steps. Each time you rerun it, Snakemake checks declared file inputs, rule code, and relevant parameters, then rebuilds missing or outdated outputs and their downstream dependants. Trait-independent cCRE annotation and LD-score work is reused across traits.
+
+After changing files or configuration, run the command again. Files and settings represented in the workflow's rules can trigger automatic invalidation; if you replace a prefix-based reference file or edit the optional `exclude_snps` list at the same path, force the affected rule or remove its old output. Removing a trait or cell type from the config also does not delete its existing output files.
+
+## 5. Running the workflow
+
+Install the software listed above, place inputs in `data/`, and check `ldsc_dir` in `workflow/config.yaml`. Then, from the repository root:
+
+```bash
+cd workflow
+snakemake --profile profiles/default --dry-run
+```
+
+Review the proposed jobs and missing inputs. If the DAG looks right, run:
+
+```bash
+snakemake --profile profiles/default
+```
+
+The profile limits concurrency to four jobs; adjust `jobs` in `workflow/profiles/default/config.yaml` for the memory and CPU available. To run only one target, provide it after the command, for example:
+
+```bash
+snakemake --profile profiles/default results/OCD/summary_table_corrected.tsv
+```
+
+For machine-specific path overrides that should not be committed, create the ignored `workflow/config.local.yaml` and add `--configfile config.local.yaml` to the commands while working in `workflow/`.
+
+## 6. Details of each step
+
+### 1. GWAS preparation and munging
+
+The `prep_gwas` rule handles the input format declared for each trait:
+
+- `daner`: calculates per-SNP effective sample size from the available Neff/N fields and computes MAF from case/control frequencies.
+- `simple`: calculates a constant effective sample size from `n_cas` and `n_con` in the config.
+- `premunged`: uses the supplied LDSC-compatible summary statistics directly.
+
+The `munge_sumstats` rule uses the HapMap3 list and writes munged statistics under `workflow/gwas/`. The raw inputs stay under `data/gwas/`.
+
+### 2. cCRE LiftOver and sorting
+
+For each configured cell type, `liftover` maps the hg38 BED intervals to hg19 using the configured UCSC chain file. `sort_bed` orders the mapped intervals for annotation generation. The chromosome prefix is retained because the configured LDSC `make_annot.py` expects it.
+
+### 3. Annotation generation
+
+`make_annot` intersects each sorted cell-type BED with the chromosome-specific 1000 Genomes EUR BIM files. Annotation files are created once per cell type and chromosome, not once per GWAS trait.
+
+### 4. LD-score calculation
+
+`l2_score` calls LDSC with `--l2`, `--thin-annot`, and the single-column HapMap3 SNP list. It produces LD scores for each cell type and chromosome. These files are reused by all downstream heritability analyses.
+
+### 5. Partitioned heritability
+
+`h2_regression` runs `ldsc.py --h2` for every trait × cell type × baseline-model combination. It combines the cell-type reference with the selected baseline annotations and uses the configured weights and allele-frequency files. The workflow expects the LDSC `parse.py` compatibility fix for multiple reference prefixes when `--overlap-annot` is used; see [`docs/data-sources.md`](docs/data-sources.md).
+
+### 6. Summaries and multiple-testing correction
+
+`summarize` collects each cell type's LDSC result into a per-trait table. `significance_testing` derives two-sided coefficient p-values from the reported z-scores and applies Benjamini–Hochberg FDR and Bonferroni correction separately for each baseline model. These summary tables are the convenient final h2 outputs; the original `.results` files are retained as well.
+
+### 7. Genetic correlation
+
+The workflow uses the `rg_traits` list for pairwise comparisons and `rg_base_trait` with each entry in `rg_comparison_traits` for the configured external comparisons. Before LDSC `--rg`, `drop_incompatible_snps` optionally removes the same rsIDs from every input using `exclude_snps`; if that file is absent or empty, the sumstats are copied unchanged. Results are collected in `workflow/results/rg/rg_summary.tsv`.
+
+## Repository organization and provenance
+
+```text
+.
+├── data/                  # local inputs; data files ignored by Git
+├── docs/data-sources.md   # sources, citations, and software notes
+├── notebooks/             # Quarto research notebook/protocol
+└── workflow/              # Snakefile, config, profiles, generated outputs
+```
+
+The notebook is [`notebooks/S_LDSC_notebook.qmd`](notebooks/S_LDSC_notebook.qmd). It contains the analysis rationale and historical QC notes; the Snakemake workflow is the source of truth for production runs. It is a Quarto document with static code examples; if Quarto is installed, render it with `quarto render notebooks/S_LDSC_notebook.qmd`. For data citations, download links, and LDSC version notes, see [`docs/data-sources.md`](docs/data-sources.md).
+
+Raw GWAS, cCRE, genotype, chain, and LD-score data are not included in Git. Check their terms and keep them in approved storage; the code's MIT license does not grant rights to redistribute the datasets or third-party software. The workflow currently does not provide per-rule Conda environments or a pinned LDSC revision, so record the exact LDSC commit and a tested software environment before treating the analysis as fully reproducible.
 ## Analyses
 
 1. Prepare raw GWAS summary statistics, or accept already-munged inputs.
@@ -60,7 +188,7 @@ The detailed input layout is described in the README files under `data/`. Do not
 
 ## Software and reproducibility
 
-The notebook records a CBIIT `ldsc39` checkout, Python 3.9, the checkout's `requirements.txt`, plus `pybedtools`, `bedtools`, and UCSC `liftOver`. The exact LDSC commit and a complete environment lock were not recorded. The workflow currently has no per-rule Conda environments, so `--use-conda` alone does not make it self-contained. Before publishing results, pin the actual LDSC commit and tested software environment, retain the `parse.py` patch/diff, and document reference-data versions and citations. See [`docs/data-sources.md`](docs/data-sources.md) for details.
+The notebook records a CBIIT `ldsc39` checkout, Python 3.9, the checkout's `requirements.txt`, plus `pybedtools`, `bedtools`, and UCSC `liftOver`. The workflow currently has no per-rule Conda environments, so `--use-conda` alone does not make it self-contained. Before publishing results, pin the actual LDSC commit and tested software environment, retain the `parse.py` patch/diff, and document reference-data versions and citations. See [`docs/data-sources.md`](docs/data-sources.md) for details.
 
 ## Configure and run
 
