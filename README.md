@@ -2,7 +2,7 @@
 
 > *Still under development.*
 
-A Snakemake workflow for **cell-type partitioned heritability** and **genetic-correlation** analyses with stratified LD Score Regression (S-LDSC). It takes cell-type cis-regulatory elements (cCREs) called from snATAC-seq data and GWAS summary statistics, lifts the cCRE annotations from **hg38** to **hg19** to match the LDSC references, computes LD scores once per cell type, runs partitioned h² and `--rg` analyses for one or more traits, and gives out enriched cell types for each trait. The pipeline can be run automatically on new cell types and traits after updating the config.
+A Snakemake workflow for **cell-type partitioned heritability** and **genetic-correlation** analyses with stratified LD Score Regression (S-LDSC). It takes cell-type cis-regulatory elements (cCREs) called from snATAC-seq data and GWAS summary statistics, lifts the cCRE annotations from **hg38** to **hg19** to match the LDSC references, computes LD scores once per cell type, runs partitioned h² and `--rg` analyses for one or more traits, and gives out enriched cell types and correlation analyses for each trait. The pipeline can be run automatically on new cell types and traits after updating the config.
 
 ## Table of contents
 
